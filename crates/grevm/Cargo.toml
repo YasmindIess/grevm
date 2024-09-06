@@ -1,0 +1,46 @@
+[package]
+name = "reth-grevm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Parallel EVM"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Reth
+reth-chainspec.workspace = true
+reth-ethereum-forks.workspace = true
+reth-evm.workspace = true
+reth-primitives = { workspace = true, features = ["reth-codec"] }
+reth-revm.workspace = true
+reth-ethereum-consensus.workspace = true
+reth-prune-types.workspace = true
+reth-execution-types.workspace = true
+
+# Ethereum
+revm-primitives.workspace = true
+
+# Alloy
+alloy-eips.workspace = true
+alloy-sol-types.workspace = true
+
+# async
+tokio = { workspace = true, features = ["sync", "macros", "time", "rt-multi-thread"] }
+lazy_static = "1.5.0"
+async-trait = "0.1.81"
+
+[dev-dependencies]
+reth-testing-utils.workspace = true
+reth-revm = { workspace = true, features = ["test-utils"] }
+reth-primitives = { workspace = true, features = ["secp256k1"] }
+secp256k1.workspace = true
+serde_json.workspace = true
+
+[features]
+default = ["std"]
+std = []
