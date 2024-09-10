@@ -1,16 +1,28 @@
 use std::collections::{BTreeSet, HashMap};
-use std::sync::{Arc, RwLock};
-use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize};
+use lazy_static::lazy_static;
 
 use revm_primitives::{Address, TxEnv};
 use revm_primitives::db::DatabaseRef;
 
 use crate::{GREVM_RUNTIME, LocationAndType, MAX_NUM_ROUND, TxId};
+use crate::hint::ParallelExecutionHints;
 use crate::partition::PartitionExecutor;
 use crate::storage::CacheDB;
+use crate::tx_dependency::TxDependency;
+
+
+lazy_static! {
+    static ref CPU_CORES: usize =
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+}
 
 pub struct GrevmScheduler<DB>
 {
+    // The number of transactions in the tx batch size.
+    tx_batch_size: usize,
+
     coinbase: Address,
     txs: Arc<Vec<TxEnv>>,
 
@@ -18,9 +30,11 @@ pub struct GrevmScheduler<DB>
     // and merge into GrevmScheduler::state
     state: Arc<CacheDB<DB>>,
 
+    parallel_execution_hints: ParallelExecutionHints,
+
     // if txi depends on txj: txi -> txj (txj should run first)
     // then, dependencies[txj].push(txi)
-    dependencies: Vec<Vec<TxId>>,
+    tx_dependencies: TxDependency,
 
     // number of partitions. maybe larger in the first round to increase concurrence
     num_partitions: usize,
@@ -39,11 +53,24 @@ where
     DB: DatabaseRef + Send + Sync + 'static,
     DB::Error: Send + Sync,
 {
-    pub fn new(db: DB) -> Self {
+    pub fn new(db: DB, tx_batch_size: usize,
+               txs_env: Vec<TxEnv>, partition_count: usize) -> Self {
         // yield the DatabaseRef trait's IO operations
-        let state = CacheDB::new(db, true);
-        todo!()
+        Self {
+            tx_batch_size,
+            coinbase: Address::default(),
+            state: Arc::from(CacheDB::new(db, true)),
+            parallel_execution_hints: ParallelExecutionHints::new(&txs_env),
+            tx_dependencies: TxDependency::new(),
+            txs: Arc::from(txs_env),
+            num_partitions: partition_count,
+            partitioned_txs: Vec::new(),
+            partition_executors: Vec::new(),
+            merged_write_set: HashMap::<LocationAndType, BTreeSet<TxId>>::new(),
+            num_finality_txs: 0,
+        }
     }
+
 
     pub fn partition_transactions(&mut self) {
         // compute and assign partitioned_txs
@@ -52,10 +79,23 @@ where
     // initialize dependencies:
     // 1. txs without contract can generate dependencies from 'from/to' address
     // 2. consensus can build the dependencies(hints) of txs with contract
-    pub fn init_dependencies(&mut self, hints: Vec<Vec<TxId>>) {
-        // self.preload()
-        // update dependencies
-        self.partition_transactions();
+    pub fn init_tx_dependencies(&mut self, hints: ParallelExecutionHints, partition_count: usize) {
+        self.parallel_execution_hints = hints;
+        self.tx_dependencies.generate_tx_dependency(&self.parallel_execution_hints);
+        self.tx_dependencies.fetch_best_partitions(partition_count);
+    }
+
+    fn split_partitions_with_tx_dependency(&mut self) {
+        // TODO(gravity_richard.zhz): Split to dependency
+        self.partitioned_txs = self.tx_dependencies.fetch_best_partitions(self.num_partitions);
+    }
+
+    pub(crate) fn update_partition_status(&self) {
+        // TODO(gravity_richard.zhz): update the status of partitions
+    }
+
+    pub(crate) fn revert(&self) {
+        // TODO(gravity_richard.zhz): update the status of partitions
     }
 
     // Preload data when initializing dependencies
@@ -98,7 +138,6 @@ where
     fn execute_remaining_sequential(&mut self) {}
 
     fn parallel_execute(&mut self, hints: Vec<Vec<TxId>>) {
-        self.init_dependencies(hints);
         for i in 0..MAX_NUM_ROUND {
             if self.num_finality_txs < self.txs.len() {
                 self.round_execute();

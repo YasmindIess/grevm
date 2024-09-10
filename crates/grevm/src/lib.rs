@@ -6,6 +6,8 @@ mod storage;
 mod scheduler;
 mod partition;
 mod grevm_test;
+mod hint;
+mod tx_dependency;
 
 lazy_static! {
     static ref GREVM_RUNTIME: Runtime = Builder::new_multi_thread()
@@ -29,4 +31,16 @@ enum LocationAndType {
     Basic(Address),
     Storage(Address, U256),
     Code(Address),
+}
+
+#[derive(Debug)]
+enum TransactionStatus {
+    Pending,
+    Conflict,
+    Finality,
+}
+
+pub struct PartitionIndex {
+    tx_index: usize,
+    partition_id: usize,
 }

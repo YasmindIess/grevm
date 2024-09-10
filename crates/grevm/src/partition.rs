@@ -1,12 +1,33 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use revm_primitives::{Address, BlockEnv, EvmState, ResultAndState, TxEnv, U256};
+use revm_primitives::alloy_primitives::ChainId;
 use revm_primitives::db::{Database, DatabaseRef};
+use reth_revm::db::DbAccount;
 
 use reth_revm::Evm;
 
-use crate::{LocationAndType, PartitionId, TxId};
+use crate::{LocationAndType, PartitionId, TransactionStatus, TxId};
+use crate::hint::TxRWSet;
 use crate::storage::CacheDB;
+
+#[derive(Debug, Clone, PartialEq)]
+enum PartitionStatus {
+    Normal,
+    Blocked,
+    Finalized,
+}
+
+#[derive(Debug)]
+pub struct Partition {
+    finalized_tx_index: TxId,
+    current_tx_index: TxId,
+    partition_status: PartitionStatus,
+    txs_status: Vec<TransactionStatus>,
+    pending_tx_result: BTreeMap<TxId, TxRWSet>,
+    partition_rw_set: TxRWSet,
+    cache_data: BTreeMap<Address, DbAccount>,
+}
 
 fn build_evm<'a, DB: Database>(
     db: &DB,
@@ -18,7 +39,7 @@ fn build_evm<'a, DB: Database>(
 
 pub struct PartitionExecutor<DB>
 {
-    chain_id: u64,
+    chain_id: ChainId,
     block_env: BlockEnv,
     coinbase: Address,
     partition_id: PartitionId,
