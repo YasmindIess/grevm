@@ -1,22 +1,22 @@
 use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, RwLock};
 use std::sync::atomic::AtomicBool;
-use std::thread;
+
 use revm_primitives::{Address, TxEnv};
 use revm_primitives::db::DatabaseRef;
-use crate::storage::CacheDB;
-use crate::{LocationAndType, MAX_NUM_ROUND, TxId};
-use crate::partition::PartitionExecutor;
 
-pub struct GrevmScheduler<'a, DB>
-where
-    DB: DatabaseRef + Send + Sync,
+use crate::{GREVM_RUNTIME, LocationAndType, MAX_NUM_ROUND, TxId};
+use crate::partition::PartitionExecutor;
+use crate::storage::CacheDB;
+
+pub struct GrevmScheduler<DB>
 {
     coinbase: Address,
-    txs: &'a [TxEnv],
+    txs: Arc<Vec<TxEnv>>,
 
     // update PartitionExecutor::cache_db of FINALITY tx after each round,
     // and merge into GrevmScheduler::state
-    state: CacheDB<DB>,
+    state: Arc<CacheDB<DB>>,
 
     // if txi depends on txj: txi -> txj (txj should run first)
     // then, dependencies[txj].push(txi)
@@ -26,7 +26,7 @@ where
     num_partitions: usize,
     // assigned txs ID for each partition
     partitioned_txs: Vec<Vec<TxId>>,
-    partition_executors: Vec<PartitionExecutor<'a, DB>>,
+    partition_executors: Vec<Arc<RwLock<PartitionExecutor<Arc<CacheDB<DB>>>>>>,
 
     // merge PartitionExecutor::write_set to merged_write_set after each round
     merged_write_set: HashMap<LocationAndType, BTreeSet<TxId>>,
@@ -34,11 +34,14 @@ where
     num_finality_txs: usize,
 }
 
-impl<'a, DB> GrevmScheduler<'a, DB>
+impl<DB> GrevmScheduler<DB>
 where
-    DB: DatabaseRef + Send + Sync,
+    DB: DatabaseRef + Send + Sync + 'static,
+    DB::Error: Send + Sync,
 {
-    pub fn new() -> Self {
+    pub fn new(db: DB) -> Self {
+        // yield the DatabaseRef trait's IO operations
+        let state = CacheDB::new(db, true);
         todo!()
     }
 
@@ -59,15 +62,19 @@ where
     async fn preload(&mut self, stop: &AtomicBool) {}
 
     fn round_execute(&mut self) {
-        thread::scope(|scope| {
-            for partition_id in 0..self.num_partitions {
-                /*
-                self.partition_executors.push(PartitionExecutor::new(&self.state));
-                scope.spawn(|| {
-                    self.partition_executors[partition_id].execute();
-                });
-                */
+        for partition_id in 0..self.num_partitions {
+            self.partition_executors.push(
+                Arc::new(RwLock::new(PartitionExecutor::new(partition_id, self.state.clone()))));
+        }
+        GREVM_RUNTIME.block_on(async {
+            let mut tasks = vec![];
+            for executor in &self.partition_executors {
+                let executor = executor.clone();
+                tasks.push(GREVM_RUNTIME.spawn(async move {
+                    executor.write().unwrap().execute()
+                }));
             }
+            futures::future::join_all(tasks).await;
         });
         // merge write set
         self.merge_write_set();

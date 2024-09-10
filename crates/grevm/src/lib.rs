@@ -5,12 +5,14 @@ use tokio::runtime::{Builder, Runtime};
 mod storage;
 mod scheduler;
 mod partition;
+mod grevm_test;
 
 lazy_static! {
-    static ref TK_RUNTIME: Runtime = Builder::new_multi_thread()
+    static ref GREVM_RUNTIME: Runtime = Builder::new_multi_thread()
         .worker_threads(std::thread::available_parallelism()
             .map(|n| n.get() * 2)
             .unwrap_or(8))
+        .thread_name("grevm-tokio-runtime")
         .enable_all()
         .build()
         .unwrap();

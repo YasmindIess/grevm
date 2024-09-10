@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-
+use std::sync::Arc;
 use revm_primitives::{Address, BlockEnv, EvmState, ResultAndState, TxEnv, U256};
 use revm_primitives::db::{Database, DatabaseRef};
 
@@ -16,9 +16,7 @@ fn build_evm<'a, DB: Database>(
     todo!()
 }
 
-pub struct PartitionExecutor<'a, DB>
-where
-    DB: DatabaseRef + Send + Sync,
+pub struct PartitionExecutor<DB>
 {
     chain_id: u64,
     block_env: BlockEnv,
@@ -27,7 +25,7 @@ where
 
     cache_db: CacheDB<DB>,
 
-    txs: &'a [TxEnv],
+    txs: Arc<Vec<TxEnv>>,
     assigned_txs: Vec<TxId>,
     read_set: Vec<HashSet<LocationAndType>>,
     write_set: Vec<HashSet<LocationAndType>>,
@@ -42,11 +40,14 @@ where
 }
 
 
-impl<'a, DB> PartitionExecutor<'a, DB>
+impl<DB> PartitionExecutor<DB>
 where
-    DB: DatabaseRef + Send + Sync,
+    DB: DatabaseRef + Send + Sync + 'static,
+    DB::Error: Send + Sync,
 {
-    pub fn new(cache_db: &CacheDB<DB>) -> Self {
+    pub fn new(partition_id: PartitionId, db: DB) -> Self {
+        // not yield in PartitionExecutor
+        let cache_db = CacheDB::new(db, false);
         todo!()
     }
 
@@ -57,7 +58,9 @@ where
     pub fn execute(&mut self) {
         let mut evm = build_evm(&self.cache_db, self.chain_id, &self.block_env);
         for txid in &self.assigned_txs {
-            *evm.tx_mut() = self.txs[*txid].clone();
+            if let Some(tx) = self.txs.get(*txid) {
+                *evm.tx_mut() = tx.clone();
+            }
             match evm.transact() {
                 Ok(result_and_state) => {
                     // update read set

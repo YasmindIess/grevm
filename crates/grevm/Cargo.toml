@@ -31,8 +31,10 @@ alloy-sol-types.workspace = true
 
 # async
 tokio = { workspace = true, features = ["sync", "macros", "time", "rt-multi-thread"] }
+futures = { workspace = true }
+rand = { workspace = true }
+auto_impl = { workspace = true }
 lazy_static = "1.5.0"
-async-trait = "0.1.81"
 
 [dev-dependencies]
 reth-testing-utils.workspace = true
