@@ -1,17 +1,20 @@
 use std::collections::{BTreeSet, HashMap};
-use std::sync::{Arc, Mutex, RwLock};
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::fmt::Display;
+use std::ops::DerefMut;
+use std::sync::{Arc, RwLock};
+use std::sync::atomic::AtomicBool;
+
 use lazy_static::lazy_static;
+use revm_primitives::{Address, Env, ResultAndState, SpecId, TxEnv};
+use revm_primitives::db::{Database, DatabaseRef};
 
-use revm_primitives::{Address, TxEnv};
-use revm_primitives::db::DatabaseRef;
+use reth_revm::EvmBuilder;
 
-use crate::{GREVM_RUNTIME, LocationAndType, MAX_NUM_ROUND, TxId};
+use crate::{GREVM_RUNTIME, GrevmError, LocationAndType, MAX_NUM_ROUND, TxId};
 use crate::hint::ParallelExecutionHints;
 use crate::partition::PartitionExecutor;
-use crate::storage::CacheDB;
+use crate::storage::SchedulerDB;
 use crate::tx_dependency::TxDependency;
-
 
 lazy_static! {
     static ref CPU_CORES: usize =
@@ -19,58 +22,68 @@ lazy_static! {
 }
 
 pub struct GrevmScheduler<DB>
+where
+    DB: DatabaseRef,
 {
     // The number of transactions in the tx batch size.
     tx_batch_size: usize,
 
+    spec_id: SpecId,
+    env: Env,
     coinbase: Address,
     txs: Arc<Vec<TxEnv>>,
 
-    // update PartitionExecutor::cache_db of FINALITY tx after each round,
-    // and merge into GrevmScheduler::state
-    state: Arc<CacheDB<DB>>,
+    scheduler_db: Arc<RwLock<SchedulerDB<Arc<DB>>>>,
+    database: Arc<DB>,
 
     parallel_execution_hints: ParallelExecutionHints,
 
-    // if txi depends on txj: txi -> txj (txj should run first)
-    // then, dependencies[txj].push(txi)
     tx_dependencies: TxDependency,
 
     // number of partitions. maybe larger in the first round to increase concurrence
     num_partitions: usize,
     // assigned txs ID for each partition
     partitioned_txs: Vec<Vec<TxId>>,
-    partition_executors: Vec<Arc<RwLock<PartitionExecutor<Arc<CacheDB<DB>>>>>>,
+    partition_executors: Vec<Arc<RwLock<PartitionExecutor<Arc<DB>>>>>,
 
     // merge PartitionExecutor::write_set to merged_write_set after each round
     merged_write_set: HashMap<LocationAndType, BTreeSet<TxId>>,
 
     num_finality_txs: usize,
+    execute_states: Vec<ResultAndState>,
 }
 
 impl<DB> GrevmScheduler<DB>
 where
     DB: DatabaseRef + Send + Sync + 'static,
-    DB::Error: Send + Sync,
+    DB::Error: Send + Sync + Display,
 {
-    pub fn new(db: DB, tx_batch_size: usize,
-               txs_env: Vec<TxEnv>, partition_count: usize) -> Self {
-        // yield the DatabaseRef trait's IO operations
+    pub fn new(spec_id: SpecId,
+               env: Env,
+               db: DB,
+               txs: Vec<TxEnv>) -> Self {
+        let coinbase = env.block.coinbase.clone();
+        let database = Arc::new(db);
+        let scheduler_db = Arc::new(RwLock::new(SchedulerDB::new(database.clone())));
+        let parallel_execution_hints = ParallelExecutionHints::new(&txs);
         Self {
-            tx_batch_size,
-            coinbase: Address::default(),
-            state: Arc::from(CacheDB::new(db, true)),
-            parallel_execution_hints: ParallelExecutionHints::new(&txs_env),
+            tx_batch_size: txs.len(),
+            spec_id,
+            env,
+            coinbase,
+            txs: Arc::new(txs),
+            scheduler_db,
+            database,
+            parallel_execution_hints,
             tx_dependencies: TxDependency::new(),
-            txs: Arc::from(txs_env),
-            num_partitions: partition_count,
-            partitioned_txs: Vec::new(),
-            partition_executors: Vec::new(),
-            merged_write_set: HashMap::<LocationAndType, BTreeSet<TxId>>::new(),
+            num_partitions: 0, // 0 for init
+            partitioned_txs: vec![],
+            partition_executors: vec![],
+            merged_write_set: Default::default(),
             num_finality_txs: 0,
+            execute_states: vec![],
         }
     }
-
 
     pub fn partition_transactions(&mut self) {
         // compute and assign partitioned_txs
@@ -104,7 +117,12 @@ where
     fn round_execute(&mut self) {
         for partition_id in 0..self.num_partitions {
             self.partition_executors.push(
-                Arc::new(RwLock::new(PartitionExecutor::new(partition_id, self.state.clone()))));
+                Arc::new(RwLock::new(PartitionExecutor::new(self.spec_id.clone(),
+                                                            partition_id,
+                                                            self.env.clone(),
+                                                            self.scheduler_db.clone(),
+                                                            self.database.clone(),
+                                                            self.txs.clone()))));
         }
         GREVM_RUNTIME.block_on(async {
             let mut tasks = vec![];
@@ -135,19 +153,43 @@ where
         todo!()
     }
 
-    fn execute_remaining_sequential(&mut self) {}
+    fn execute_remaining_sequential(&mut self) -> Result<(), GrevmError> {
+        assert_eq!(self.num_finality_txs, self.execute_states.len());
+        // execute remaining txs
+        let mut db_guard = self.scheduler_db.write().unwrap();
+        let mut evm = EvmBuilder::default().with_db(db_guard.deref_mut())
+            .with_spec_id(self.spec_id)
+            .with_env(Box::new(self.env.clone()))
+            .build();
+        for txid in self.num_finality_txs..self.txs.len() {
+            if let Some(tx) = self.txs.get(txid) {
+                *evm.tx_mut() = tx.clone();
+            } else {
+                return Err(GrevmError::UnreachableError(String::from("Wrong transactions ID")));
+            }
+            match evm.transact() {
+                Ok(result_and_state) => {
+                    evm.db_mut().commit(result_and_state.state.clone());
+                    self.execute_states.push(result_and_state);
+                }
+                Err(err) => return Err(GrevmError::ExecutionError(err.to_string())),
+            }
+        }
+        Ok(())
+    }
 
-    fn parallel_execute(&mut self, hints: Vec<Vec<TxId>>) {
+    fn parallel_execute(&mut self, hints: Vec<Vec<TxId>>) -> Result<(), GrevmError> {
         for i in 0..MAX_NUM_ROUND {
             if self.num_finality_txs < self.txs.len() {
+                self.partition_transactions();
                 self.round_execute();
-                if self.num_finality_txs < self.txs.len() && i < MAX_NUM_ROUND - 1 {
-                    self.partition_transactions();
-                }
+            } else {
+                break;
             }
         }
         if self.num_finality_txs < self.txs.len() {
-            self.execute_remaining_sequential();
+            self.execute_remaining_sequential()?;
         }
+        Ok(())
     }
 }

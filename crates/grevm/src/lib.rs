@@ -44,3 +44,9 @@ pub struct PartitionIndex {
     tx_index: usize,
     partition_id: usize,
 }
+
+#[derive(Debug)]
+pub enum GrevmError {
+    ExecutionError(String),
+    UnreachableError(String),
+}

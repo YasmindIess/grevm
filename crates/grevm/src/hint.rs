@@ -4,7 +4,6 @@ use alloy_sol_types::private::Address;
 use alloy_sol_types::private::primitives::TxKind;
 use revm_primitives::TxEnv;
 use reth_revm::db::DbAccount;
-use crate::TxId;
 
 pub type ReadKVSet = BTreeMap<Address, Option<DbAccount>>;
 pub type WriteKVSet = BTreeMap<Address, Option<DbAccount>>;

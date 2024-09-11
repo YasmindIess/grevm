@@ -1,63 +1,78 @@
-use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
 
-use revm_primitives::{AccountInfo, B256, Bytecode, EvmState};
+use revm_primitives::{Account, AccountInfo, B256, Bytecode, EvmState};
 use revm_primitives::db::{Database, DatabaseRef};
 
 use reth_primitives::{Address, U256};
-use reth_revm::{CacheState, TransitionState};
-use reth_revm::db::BundleState;
+use reth_revm::CacheState;
 
 use crate::{GREVM_RUNTIME, LocationAndType};
 
-pub struct CacheDB<DB> {
-    pub coinbase: Address,
+/// Read from cache, return Some if found
+trait CacheRead {
+    fn basic_option(&self, address: Address) -> Option<AccountInfo>;
 
-    pub cache: CacheState,
+    fn code_by_hash_option(&self, code_hash: B256) -> Option<Bytecode>;
 
-    pub database: Arc<DB>,
-    // whether to yield IO operations
-    // only yield for GrevmScheduler's DatabaseRef trait
-    pub should_yield: bool,
+    fn storage_option(&self, address: Address, index: U256) -> Option<U256>;
 
-    pub transition_state: Option<TransitionState>,
-
-    pub bundle_state: BundleState,
-
-    pub use_preloaded_bundle: bool,
-
-    pub block_hashes: BTreeMap<u64, B256>,
-
-    tx_read_set: HashSet<LocationAndType>,
+    fn block_hash_option(&self, number: u64) -> Option<B256>;
 }
 
-impl<DB> CacheDB<DB> {
-    pub fn new(db: DB, should_yield: bool) -> Self {
+impl CacheRead for CacheState {
+    fn basic_option(&self, address: Address) -> Option<AccountInfo> {
         todo!()
     }
 
-    // consume the read set after evm.transact() for each tx
-    pub fn take_read_set(&mut self) -> HashSet<LocationAndType> {
-        core::mem::take(&mut self.tx_read_set)
+    fn code_by_hash_option(&self, code_hash: B256) -> Option<Bytecode> {
+        todo!()
     }
 
-    // temporary commit the state change after evm.transact() for each tx
-    pub fn temporary_commit(&mut self, changes: &EvmState) {}
+    fn storage_option(&self, address: Address, index: U256) -> Option<U256> {
+        todo!()
+    }
 
-    // commit the state changes of txs in FINALITY state after each round
-    pub fn finality_commit(&mut self, changes: &EvmState) {}
+    fn block_hash_option(&self, number: u64) -> Option<B256> {
+        todo!()
+    }
 }
 
-/// Used to build evm, and hook the read operations
-impl<DB> Database for CacheDB<DB>
+pub struct SchedulerDB<DB> {
+    // cache committed data in each round
+    pub cache: CacheState,
+    pub database: DB,
+}
+
+impl<DB> SchedulerDB<DB> {
+    pub fn new(database: DB) -> Self {
+        Self {
+            cache: Default::default(),
+            database,
+        }
+    }
+
+    /// Fall back to sequential execute
+    pub fn commit(&mut self, changes: HashMap<Address, Account>) {
+        todo!()
+    }
+}
+
+/// Fall back to sequential execute
+impl<DB> Database for SchedulerDB<DB>
 where
-    DB: DatabaseRef + Send + Sync,
-    DB::Error: Send + Sync,
+    DB: DatabaseRef
 {
     type Error = DB::Error;
 
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        todo!()
+        let info = self.cache.basic_option(address);
+        if info.is_some() {
+            return Ok(info);
+        }
+        let info = self.database.basic_ref(address);
+        // todo: update cache
+        info
     }
 
     fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
@@ -73,38 +88,98 @@ where
     }
 }
 
-/// Used for GrevmScheduler::state
-impl<DB> DatabaseRef for CacheDB<DB>
-where
-    DB: DatabaseRef + Send + Sync + 'static,
-    DB::Error: Send + Sync,
-{
-    type Error = <Self as Database>::Error;
+impl<DB> CacheRead for SchedulerDB<DB> {
+    fn basic_option(&self, address: Address) -> Option<AccountInfo> {
+        todo!()
+    }
 
-    fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        if self.should_yield {
-            let db = self.database.clone();
-            tokio::task::block_in_place(move || {
-                GREVM_RUNTIME.block_on(async move {
-                    tokio::task::spawn_blocking(move || {
-                        db.basic_ref(address)
-                    }).await.unwrap()
-                })
-            })
-        } else {
-            self.database.basic_ref(address)
+    fn code_by_hash_option(&self, code_hash: B256) -> Option<Bytecode> {
+        todo!()
+    }
+
+    fn storage_option(&self, address: Address, index: U256) -> Option<U256> {
+        todo!()
+    }
+
+    fn block_hash_option(&self, number: u64) -> Option<B256> {
+        todo!()
+    }
+}
+
+pub struct PartitionDB<DB> {
+    pub coinbase: Address,
+
+    // read internal cache
+    pub cache: CacheState,
+    // read pre-round commit data
+    pub scheduler_db: Arc<RwLock<SchedulerDB<DB>>>,
+    // read data from origin database
+    pub database: DB,
+
+    tx_read_set: HashSet<LocationAndType>,
+}
+
+impl<DB> PartitionDB<DB> {
+    pub fn new(coinbase: Address,
+               scheduler_db: Arc<RwLock<SchedulerDB<DB>>>,
+               database: DB) -> Self {
+        Self {
+            coinbase,
+            cache: Default::default(),
+            scheduler_db,
+            database,
+            tx_read_set: Default::default(),
         }
     }
 
-    fn code_by_hash_ref(&self, code_hash: B256) -> Result<Bytecode, Self::Error> {
+    // consume the read set after evm.transact() for each tx
+    pub fn take_read_set(&mut self) -> HashSet<LocationAndType> {
+        core::mem::take(&mut self.tx_read_set)
+    }
+
+    // temporary commit the state change after evm.transact() for each tx
+    pub fn temporary_commit(&mut self, changes: &EvmState) {}
+
+    // commit the state changes of txs in FINALITY state after each round
+    pub fn finality_commit(&mut self, changes: &EvmState) {}
+}
+
+/// Used to build evm, and hook the read operations
+impl<DB> Database for PartitionDB<DB>
+where
+    DB: DatabaseRef + Send + Sync,
+    DB::Error: Send + Sync,
+{
+    type Error = DB::Error;
+
+    fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+        // 1. read from internal cache
+        let info = self.cache.basic_option(address.clone());
+        if info.is_some() {
+            return Ok(info);
+        }
+        // 2. read from pre-round commit data
+        let info = self.scheduler_db.read().unwrap().basic_option(address.clone());
+        if info.is_some() {
+            return Ok(info);
+        }
+        // 3. read from origin database
+        tokio::task::block_in_place(move || {
+            let info = self.database.basic_ref(address);
+            // todo: update self.cache
+            info
+        })
+    }
+
+    fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
         todo!()
     }
 
-    fn storage_ref(&self, address: Address, index: U256) -> Result<U256, Self::Error> {
+    fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
         todo!()
     }
 
-    fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
+    fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
         todo!()
     }
 }

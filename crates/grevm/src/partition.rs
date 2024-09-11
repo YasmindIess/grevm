@@ -1,15 +1,15 @@
 use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
-use revm_primitives::{Address, BlockEnv, EvmState, ResultAndState, TxEnv, U256};
-use revm_primitives::alloy_primitives::ChainId;
-use revm_primitives::db::{Database, DatabaseRef};
-use reth_revm::db::DbAccount;
+use std::sync::{Arc, RwLock};
 
-use reth_revm::Evm;
+use revm_primitives::{Address, Env, EvmState, ResultAndState, SpecId, TxEnv, U256};
+use revm_primitives::db::{Database, DatabaseRef};
+
+use reth_revm::db::DbAccount;
+use reth_revm::EvmBuilder;
 
 use crate::{LocationAndType, PartitionId, TransactionStatus, TxId};
 use crate::hint::TxRWSet;
-use crate::storage::CacheDB;
+use crate::storage::{PartitionDB, SchedulerDB};
 
 #[derive(Debug, Clone, PartialEq)]
 enum PartitionStatus {
@@ -29,22 +29,14 @@ pub struct Partition {
     cache_data: BTreeMap<Address, DbAccount>,
 }
 
-fn build_evm<'a, DB: Database>(
-    db: &DB,
-    chain_id: u64,
-    block_env: &BlockEnv,
-) -> Evm<'a, (), DB> {
-    todo!()
-}
-
 pub struct PartitionExecutor<DB>
 {
-    chain_id: ChainId,
-    block_env: BlockEnv,
+    spec_id: SpecId,
+    env: Env,
     coinbase: Address,
     partition_id: PartitionId,
 
-    cache_db: CacheDB<DB>,
+    partition_db: PartitionDB<DB>,
 
     txs: Arc<Vec<TxEnv>>,
     assigned_txs: Vec<TxId>,
@@ -66,10 +58,30 @@ where
     DB: DatabaseRef + Send + Sync + 'static,
     DB::Error: Send + Sync,
 {
-    pub fn new(partition_id: PartitionId, db: DB) -> Self {
-        // not yield in PartitionExecutor
-        let cache_db = CacheDB::new(db, false);
-        todo!()
+    pub fn new(spec_id: SpecId,
+               partition_id: PartitionId,
+               env: Env,
+               scheduler_db: Arc<RwLock<SchedulerDB<DB>>>,
+               database: DB,
+               txs: Arc<Vec<TxEnv>>) -> Self {
+        let coinbase = env.block.coinbase.clone();
+        let cache_db = PartitionDB::new(coinbase.clone(), scheduler_db, database);
+        Self {
+            spec_id,
+            env,
+            coinbase,
+            partition_id,
+            partition_db: cache_db,
+            txs,
+            assigned_txs: vec![],
+            read_set: vec![],
+            write_set: vec![],
+            execute_states: vec![],
+            finality_txs: vec![],
+            conflict_txs: vec![],
+            unconfirmed_txs: vec![],
+            coinbase_rewards: vec![],
+        }
     }
 
     pub fn generate_write_set(changes: &EvmState) -> HashSet<LocationAndType> {
@@ -77,19 +89,24 @@ where
     }
 
     pub fn execute(&mut self) {
-        let mut evm = build_evm(&self.cache_db, self.chain_id, &self.block_env);
+        let mut evm = EvmBuilder::default().with_db(&mut self.partition_db)
+            .with_spec_id(self.spec_id)
+            .with_env(Box::new(self.env.clone()))
+            .build();
         for txid in &self.assigned_txs {
             if let Some(tx) = self.txs.get(*txid) {
                 *evm.tx_mut() = tx.clone();
+            } else {
+                panic!("Wrong transactions ID");
             }
             match evm.transact() {
                 Ok(result_and_state) => {
                     // update read set
-                    self.read_set.push(self.cache_db.take_read_set());
+                    self.read_set.push(evm.db_mut().take_read_set());
                     // update write set
                     self.write_set.push(Self::generate_write_set(&result_and_state.state));
                     // temporary commit to cache_db, to make use the remaining txs can read the updated data
-                    self.cache_db.temporary_commit(&result_and_state.state);
+                    evm.db_mut().temporary_commit(&result_and_state.state);
                     // update the result set to get the final result of FINALITY tx in scheduler
                     self.execute_states.push(result_and_state);
                 }
