@@ -4,22 +4,16 @@ use std::ops::DerefMut;
 use std::sync::{Arc, RwLock};
 use std::sync::atomic::AtomicBool;
 
-use lazy_static::lazy_static;
 use revm_primitives::{Address, Env, ResultAndState, SpecId, TxEnv};
 use revm_primitives::db::{Database, DatabaseRef};
 
 use reth_revm::EvmBuilder;
 
-use crate::{GREVM_RUNTIME, GrevmError, LocationAndType, MAX_NUM_ROUND, TxId};
+use crate::{CPU_CORES, GREVM_RUNTIME, GrevmError, LocationAndType, MAX_NUM_ROUND, TxId};
 use crate::hint::ParallelExecutionHints;
-use crate::partition::PartitionExecutor;
+use crate::partition::{OrderedVectorExt, PartitionExecutor};
 use crate::storage::SchedulerDB;
 use crate::tx_dependency::TxDependency;
-
-lazy_static! {
-    static ref CPU_CORES: usize =
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
-}
 
 pub struct GrevmScheduler<DB>
 where
@@ -46,11 +40,12 @@ where
     partitioned_txs: Vec<Vec<TxId>>,
     partition_executors: Vec<Arc<RwLock<PartitionExecutor<Arc<DB>>>>>,
 
-    // merge PartitionExecutor::write_set to merged_write_set after each round
-    merged_write_set: HashMap<LocationAndType, BTreeSet<TxId>>,
-
     num_finality_txs: usize,
     execute_states: Vec<ResultAndState>,
+
+    // update after each round
+    conflict_txs: Vec<TxId>,        // tx that is conflicted and need to rerun
+    unconfirmed_txs: Vec<TxId>,     // tx that is validated but not the continuous ID
 }
 
 impl<DB> GrevmScheduler<DB>
@@ -66,6 +61,7 @@ where
         let database = Arc::new(db);
         let scheduler_db = Arc::new(RwLock::new(SchedulerDB::new(database.clone())));
         let parallel_execution_hints = ParallelExecutionHints::new(&txs);
+        let num_partitions = *CPU_CORES * 2 + 1; // 2 * cpu + 1 for initial partition number
         Self {
             tx_batch_size: txs.len(),
             spec_id,
@@ -76,12 +72,13 @@ where
             database,
             parallel_execution_hints,
             tx_dependencies: TxDependency::new(),
-            num_partitions: 0, // 0 for init
+            num_partitions,
             partitioned_txs: vec![],
             partition_executors: vec![],
-            merged_write_set: Default::default(),
             num_finality_txs: 0,
             execute_states: vec![],
+            conflict_txs: vec![],
+            unconfirmed_txs: vec![],
         }
     }
 
@@ -114,7 +111,7 @@ where
     // Preload data when initializing dependencies
     async fn preload(&mut self, stop: &AtomicBool) {}
 
-    fn round_execute(&mut self) {
+    fn round_execute(&mut self) -> Result<(), GrevmError> {
         for partition_id in 0..self.num_partitions {
             self.partition_executors.push(
                 Arc::new(RwLock::new(PartitionExecutor::new(self.spec_id.clone(),
@@ -134,23 +131,109 @@ where
             }
             futures::future::join_all(tasks).await;
         });
-        // merge write set
-        self.merge_write_set();
         // validate transactions
-        self.num_finality_txs += self.validate_transactions();
+        self.validate_transactions()
     }
 
     // merge write set after each round
-    fn merge_write_set(&mut self) {}
-
-    // return the number of txs that in FINALITY state
-    fn validate_transactions(&mut self) -> usize {
+    fn merge_write_set(&mut self) -> HashMap<LocationAndType, BTreeSet<TxId>> {
+        let mut merged_write_set: HashMap<LocationAndType, BTreeSet<TxId>> = HashMap::new();
         for executor in &self.partition_executors {
-            // Tx validate process:
-            // 1. Traverse the read set of each tx in each partition, and find the Range<TxId> less than tx in merged_write_set
-            // 2. conflict: 1) exist tx in Range<TxId> not belong to tx's partition; 2) exist tx in Range<TxId> is conflicted
+            let executor = executor.read().unwrap();
+            for (txid, ws) in executor.assigned_txs.iter().zip(executor.write_set.iter()) {
+                for location in ws {
+                    merged_write_set.entry(location.clone())
+                        .or_default()
+                        .insert(*txid);
+                }
+            }
         }
-        todo!()
+        merged_write_set
+    }
+
+    /// verification of transaction state after each round
+    /// Because after each round execution, the read-write set is no longer updated.
+    /// We can check in parallel whether the read set is out of bounds.
+    fn validate_transactions(&mut self) -> Result<(), GrevmError> {
+        GREVM_RUNTIME.block_on(async {
+            let mut tasks = vec![];
+            let merged_write_set = Arc::new(self.merge_write_set());
+            for executor in &self.partition_executors {
+                let executor = executor.clone();
+                let merged_write_set = merged_write_set.clone();
+                tasks.push(GREVM_RUNTIME.spawn(async move {
+                    // Tx validate process:
+                    // 1. Traverse the read set of each tx in each partition, and find the Range<TxId> less than tx in merged_write_set
+                    // 2. conflict: 1) exist tx in Range<TxId> not belong to tx's partition; 2) exist tx in Range<TxId> is conflicted
+                    let mut executor = executor.write().unwrap();
+                    let executor = executor.deref_mut();
+
+                    for (txid, rs) in executor.assigned_txs.iter().zip(executor.read_set.iter()) {
+                        for location in rs {
+                            if let Some(written_txs) = merged_write_set.get(location) {
+                                for previous_txid in written_txs.range(..txid) {
+                                    if executor.assigned_txs.has(previous_txid) {
+                                        if executor.conflict_txs.has(previous_txid) {
+                                            executor.conflict_txs.push(*txid);
+                                        } else {
+                                            executor.unconfirmed_txs.push(*txid);
+                                        }
+                                    } else {
+                                        executor.conflict_txs.push(*txid);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }));
+            }
+            futures::future::join_all(tasks).await;
+        });
+        // find the continuous min txid
+        let mut unconfirmed_txs = BTreeSet::new();
+        for executor in &self.partition_executors {
+            for txid in executor.read().unwrap().unconfirmed_txs.iter() {
+                unconfirmed_txs.insert(*txid);
+            }
+        }
+        if let Some(min_txid) = unconfirmed_txs.first() {
+            if *min_txid != self.num_finality_txs {
+                return Err(GrevmError::ExecutionError(String::from("Discontinuous finality transaction ID")));
+            }
+        } else {
+            return Err(GrevmError::ExecutionError(String::from("Can't finalize a transaction in an execution round")));
+        }
+        for txid in unconfirmed_txs {
+            if txid == self.num_finality_txs {
+                self.num_finality_txs += 1;
+            } else {
+                break;
+            }
+        }
+        // update the final conflict_txs and unconfirmed_txs
+        let mut conflict_txs = BTreeSet::new();
+        let mut unconfirmed_txs = BTreeSet::new();
+        for executor in &self.partition_executors {
+            let executor = executor.read().unwrap();
+            for txid in executor.conflict_txs.iter() {
+                conflict_txs.insert(*txid);
+            }
+            for txid in executor.unconfirmed_txs.iter() {
+                // we didn't delete the finality txs from executor.unconfirmed_txs for we no longer use
+                // maybe we should update if we use executor.unconfirmed_txs later
+                if *txid >= self.num_finality_txs {
+                    unconfirmed_txs.insert(*txid);
+                }
+            }
+        }
+        self.conflict_txs = conflict_txs.into_iter().collect();
+        self.unconfirmed_txs = unconfirmed_txs.into_iter().collect();
+        let validate_len = self.num_finality_txs + self.conflict_txs.len() + self.unconfirmed_txs.len();
+        if validate_len != self.tx_batch_size {
+            Err(GrevmError::ExecutionError(String::from("Invalidate txs length")))
+        } else {
+            Ok(())
+        }
     }
 
     fn execute_remaining_sequential(&mut self) -> Result<(), GrevmError> {
@@ -182,7 +265,7 @@ where
         for i in 0..MAX_NUM_ROUND {
             if self.num_finality_txs < self.txs.len() {
                 self.partition_transactions();
-                self.round_execute();
+                self.round_execute()?;
             } else {
                 break;
             }

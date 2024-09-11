@@ -10,6 +10,11 @@ mod hint;
 mod tx_dependency;
 
 lazy_static! {
+    static ref CPU_CORES: usize =
+        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+}
+
+lazy_static! {
     static ref GREVM_RUNTIME: Runtime = Builder::new_multi_thread()
         .worker_threads(std::thread::available_parallelism()
             .map(|n| n.get() * 2)
@@ -26,7 +31,7 @@ type PartitionId = usize;
 
 type TxId = usize;
 
-#[derive(PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum LocationAndType {
     Basic(Address),
     Storage(Address, U256),
@@ -35,9 +40,11 @@ enum LocationAndType {
 
 #[derive(Debug)]
 enum TransactionStatus {
-    Pending,
-    Conflict,
-    Finality,
+    Initial,        // tx that has not yet been run once
+    Unconfirmed,    // tx that is validated but not the continuous ID
+    Pending,        // tx that is pending to wait other txs ready
+    Conflict,       // tx that is conflicted and need to rerun
+    Finality,       // tx that is validated and is the continuous ID
 }
 
 pub struct PartitionIndex {

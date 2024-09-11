@@ -29,6 +29,17 @@ pub struct Partition {
     cache_data: BTreeMap<Address, DbAccount>,
 }
 
+/// Add some binary search methods for ordered vectors
+pub trait OrderedVectorExt<E> {
+    fn has(&self, element: &E) -> bool;
+}
+
+impl<E: Ord> OrderedVectorExt<E> for Vec<E> {
+    fn has(&self, element: &E) -> bool {
+        self.binary_search(element).is_ok()
+    }
+}
+
 pub struct PartitionExecutor<DB>
 {
     spec_id: SpecId,
@@ -39,17 +50,16 @@ pub struct PartitionExecutor<DB>
     partition_db: PartitionDB<DB>,
 
     txs: Arc<Vec<TxEnv>>,
-    assigned_txs: Vec<TxId>,
-    read_set: Vec<HashSet<LocationAndType>>,
-    write_set: Vec<HashSet<LocationAndType>>,
+    pub assigned_txs: Vec<TxId>,
+    pub read_set: Vec<HashSet<LocationAndType>>,
+    pub write_set: Vec<HashSet<LocationAndType>>,
 
-    execute_states: Vec<ResultAndState>,
+    pub execute_states: Vec<ResultAndState>,
 
-    finality_txs: Vec<TxId>,
-    conflict_txs: Vec<TxId>,
-    unconfirmed_txs: Vec<TxId>,
+    pub conflict_txs: Vec<TxId>,
+    pub unconfirmed_txs: Vec<TxId>,
 
-    coinbase_rewards: Vec<U256>,
+    pub coinbase_rewards: Vec<U256>,
 }
 
 
@@ -77,7 +87,6 @@ where
             read_set: vec![],
             write_set: vec![],
             execute_states: vec![],
-            finality_txs: vec![],
             conflict_txs: vec![],
             unconfirmed_txs: vec![],
             coinbase_rewards: vec![],
