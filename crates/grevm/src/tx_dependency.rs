@@ -7,13 +7,13 @@ pub struct TxDependency {
 
 impl TxDependency {
     pub fn new() -> Self {
-        TxDependency {
-            tx_dependency: vec![],
-        }
+        TxDependency { tx_dependency: vec![] }
     }
 
     pub fn generate_tx_dependency(
-        &mut self, parallel_execution_hints: &ParallelExecutionHints) -> Vec<Vec<TxId>> {
+        &mut self,
+        parallel_execution_hints: &ParallelExecutionHints,
+    ) -> Vec<Vec<TxId>> {
         todo!()
     }
 

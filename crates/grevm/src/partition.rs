@@ -1,15 +1,15 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, RwLock};
 
-use revm_primitives::{Address, Env, EvmState, ResultAndState, SpecId, TxEnv, U256};
 use revm_primitives::db::{Database, DatabaseRef};
+use revm_primitives::{Address, Env, EvmState, ResultAndState, SpecId, TxEnv, U256};
 
 use reth_revm::db::DbAccount;
-use reth_revm::EvmBuilder;
+use reth_revm::{CacheState, EvmBuilder};
 
-use crate::{LocationAndType, PartitionId, TransactionStatus, TxId};
 use crate::hint::TxRWSet;
 use crate::storage::{PartitionDB, SchedulerDB};
+use crate::{LocationAndType, PartitionId, TransactionStatus, TxId};
 
 #[derive(Debug, Clone, PartialEq)]
 enum PartitionStatus {
@@ -40,8 +40,7 @@ impl<E: Ord> OrderedVectorExt<E> for Vec<E> {
     }
 }
 
-pub struct PartitionExecutor<DB>
-{
+pub struct PartitionExecutor<DB> {
     spec_id: SpecId,
     env: Env,
     coinbase: Address,
@@ -62,26 +61,27 @@ pub struct PartitionExecutor<DB>
     pub coinbase_rewards: Vec<U256>,
 }
 
-
 impl<DB> PartitionExecutor<DB>
 where
     DB: DatabaseRef + Send + Sync + 'static,
     DB::Error: Send + Sync,
 {
-    pub fn new(spec_id: SpecId,
-               partition_id: PartitionId,
-               env: Env,
-               scheduler_db: Arc<RwLock<SchedulerDB<DB>>>,
-               database: DB,
-               txs: Arc<Vec<TxEnv>>) -> Self {
+    pub fn new(
+        spec_id: SpecId,
+        partition_id: PartitionId,
+        env: Env,
+        scheduler_cache: Arc<CacheState>,
+        database: DB,
+        txs: Arc<Vec<TxEnv>>,
+    ) -> Self {
         let coinbase = env.block.coinbase.clone();
-        let cache_db = PartitionDB::new(coinbase.clone(), scheduler_db, database);
+        let partition_db = PartitionDB::new(coinbase.clone(), scheduler_cache, database);
         Self {
             spec_id,
             env,
             coinbase,
             partition_id,
-            partition_db: cache_db,
+            partition_db,
             txs,
             assigned_txs: vec![],
             read_set: vec![],
@@ -98,7 +98,8 @@ where
     }
 
     pub fn execute(&mut self) {
-        let mut evm = EvmBuilder::default().with_db(&mut self.partition_db)
+        let mut evm = EvmBuilder::default()
+            .with_db(&mut self.partition_db)
             .with_spec_id(self.spec_id)
             .with_env(Box::new(self.env.clone()))
             .build();

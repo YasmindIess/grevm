@@ -2,11 +2,11 @@ use lazy_static::lazy_static;
 use revm_primitives::{Address, U256};
 use tokio::runtime::{Builder, Runtime};
 
-mod storage;
-mod scheduler;
-mod partition;
 mod grevm_test;
 mod hint;
+mod partition;
+mod scheduler;
+mod storage;
 mod tx_dependency;
 
 lazy_static! {
@@ -16,9 +16,7 @@ lazy_static! {
 
 lazy_static! {
     static ref GREVM_RUNTIME: Runtime = Builder::new_multi_thread()
-        .worker_threads(std::thread::available_parallelism()
-            .map(|n| n.get() * 2)
-            .unwrap_or(8))
+        .worker_threads(std::thread::available_parallelism().map(|n| n.get() * 2).unwrap_or(8))
         .thread_name("grevm-tokio-runtime")
         .enable_all()
         .build()
@@ -40,11 +38,11 @@ enum LocationAndType {
 
 #[derive(Debug)]
 enum TransactionStatus {
-    Initial,        // tx that has not yet been run once
-    Unconfirmed,    // tx that is validated but not the continuous ID
-    Pending,        // tx that is pending to wait other txs ready
-    Conflict,       // tx that is conflicted and need to rerun
-    Finality,       // tx that is validated and is the continuous ID
+    Initial,     // tx that has not yet been run once
+    Unconfirmed, // tx that is validated but not the continuous ID
+    Pending,     // tx that is pending to wait other txs ready
+    Conflict,    // tx that is conflicted and need to rerun
+    Finality,    // tx that is validated and is the continuous ID
 }
 
 pub struct PartitionIndex {
