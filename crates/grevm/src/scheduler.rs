@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Display;
 use std::ops::DerefMut;
 use std::sync::atomic::AtomicBool;
@@ -10,10 +10,14 @@ use revm_primitives::{Address, Env, ResultAndState, SpecId, TxEnv};
 use reth_revm::{CacheState, EvmBuilder};
 
 use crate::hint::ParallelExecutionHints;
-use crate::partition::{OrderedVectorExt, PartitionExecutor};
+use crate::partition::{
+    OrderedVectorExt, PartitionExecutor, PreRoundContext, PreUnconfirmedContext,
+};
 use crate::storage::SchedulerDB;
 use crate::tx_dependency::TxDependency;
-use crate::{GrevmError, LocationAndType, TxId, CPU_CORES, GREVM_RUNTIME, MAX_NUM_ROUND};
+use crate::{
+    GrevmError, LocationAndType, PartitionId, TxId, CPU_CORES, GREVM_RUNTIME, MAX_NUM_ROUND,
+};
 
 pub struct GrevmScheduler<DB>
 where
@@ -44,8 +48,7 @@ where
     execute_states: Vec<ResultAndState>,
 
     // update after each round
-    conflict_txs: Vec<TxId>,    // tx that is conflicted and need to rerun
-    unconfirmed_txs: Vec<TxId>, // tx that is validated but not the continuous ID
+    pre_unconfirmed_txs: BTreeMap<TxId, PreUnconfirmedContext>,
 }
 
 impl<DB> GrevmScheduler<DB>
@@ -72,8 +75,7 @@ where
             partition_executors: vec![],
             num_finality_txs: 0,
             execute_states: vec![],
-            conflict_txs: vec![],
-            unconfirmed_txs: vec![],
+            pre_unconfirmed_txs: BTreeMap::new(),
         }
     }
 
@@ -106,17 +108,41 @@ where
     // Preload data when initializing dependencies
     async fn preload(&mut self, stop: &AtomicBool) {}
 
+    fn generate_partition_pre_context(
+        &mut self,
+        partition_id: PartitionId,
+    ) -> Option<PreRoundContext> {
+        let mut pre_unconfirmed_txs = BTreeMap::new();
+        for txid in &self.partitioned_txs[partition_id] {
+            if let Some(ctx) = self.pre_unconfirmed_txs.remove(txid) {
+                pre_unconfirmed_txs.insert(*txid, ctx);
+            }
+        }
+        if pre_unconfirmed_txs.is_empty() {
+            None
+        } else {
+            Some(PreRoundContext { pre_unconfirmed_txs })
+        }
+    }
+
     fn round_execute(&mut self) -> Result<(), GrevmError> {
+        self.partitioned_txs.clear();
         for partition_id in 0..self.num_partitions {
-            self.partition_executors.push(Arc::new(RwLock::new(PartitionExecutor::new(
+            let mut executor = PartitionExecutor::new(
                 self.spec_id.clone(),
                 partition_id,
                 self.env.clone(),
                 self.cache.as_ref().unwrap().clone(),
                 self.database.clone(),
                 self.txs.clone(),
-            ))));
+                self.partitioned_txs[partition_id].clone(),
+            );
+            executor.set_pre_round_ctx(self.generate_partition_pre_context(partition_id));
+            self.partition_executors.push(Arc::new(RwLock::new(executor)));
         }
+        // has released pre_unconfirmed_txs
+        assert!(self.pre_unconfirmed_txs.is_empty());
+
         GREVM_RUNTIME.block_on(async {
             let mut tasks = vec![];
             for executor in &self.partition_executors {
@@ -146,6 +172,34 @@ where
         merged_write_set
     }
 
+    /// When validating the transaction status, the dependency relationship was updated.
+    /// But there are some transactions that have entered the finality state,
+    /// and there is no need to record the dependency and dependent relationships of these transactions.
+    /// Thus achieving the purpose of pruning.
+    fn update_and_pruning_dependency(&mut self) {
+        let num_finality_txs = self.num_finality_txs;
+        if num_finality_txs == self.txs.len() {
+            return;
+        }
+        let mut new_dependency: Vec<Vec<TxId>> = vec![vec![]; self.txs.len() - num_finality_txs];
+        for executor in &self.partition_executors {
+            let executor = executor.read().unwrap();
+            for (txid, dep) in executor.assigned_txs.iter().zip(executor.tx_dependency.iter()) {
+                if *txid >= num_finality_txs {
+                    let tmp = dep.clone();
+                    // pruning the tx that is finality state
+                    new_dependency[*txid - num_finality_txs] = dep
+                        .clone()
+                        .into_iter()
+                        // pruning the dependent tx that is finality state
+                        .filter(|dep_id| *dep_id >= num_finality_txs)
+                        .collect();
+                }
+            }
+        }
+        self.tx_dependencies.update_tx_dependency(new_dependency, num_finality_txs, None);
+    }
+
     /// verification of transaction state after each round
     /// Because after each round execution, the read-write set is no longer updated.
     /// We can check in parallel whether the read set is out of bounds.
@@ -164,20 +218,30 @@ where
                     let executor = executor.deref_mut();
 
                     for (txid, rs) in executor.assigned_txs.iter().zip(executor.read_set.iter()) {
+                        let mut conflict = executor.execute_results[*txid].is_err();
+                        if conflict {
+                            // Transactions that fail in partition executor are in conflict state
+                            executor.conflict_txs.push(*txid);
+                        }
+                        let mut updated_dependencies = BTreeSet::new();
                         for location in rs {
                             if let Some(written_txs) = merged_write_set.get(location) {
                                 for previous_txid in written_txs.range(..txid) {
-                                    if executor.assigned_txs.has(previous_txid) {
-                                        if executor.conflict_txs.has(previous_txid) {
-                                            executor.conflict_txs.push(*txid);
-                                        } else {
-                                            executor.unconfirmed_txs.push(*txid);
-                                        }
-                                    } else {
+                                    // update dependencies: previous_txid <- txid
+                                    updated_dependencies.insert(*previous_txid);
+                                    if !conflict
+                                        && (!executor.assigned_txs.has(previous_txid)
+                                            || executor.conflict_txs.has(previous_txid))
+                                    {
                                         executor.conflict_txs.push(*txid);
+                                        conflict = true;
                                     }
                                 }
                             }
+                        }
+                        executor.tx_dependency.push(updated_dependencies);
+                        if !conflict {
+                            executor.unconfirmed_txs.push(*txid);
                         }
                     }
                 }));
@@ -185,14 +249,33 @@ where
             futures::future::join_all(tasks).await;
         });
         // find the continuous min txid
-        let mut unconfirmed_txs = BTreeSet::new();
+        let mut unconfirmed_txs = BTreeMap::new();
         for executor in &self.partition_executors {
-            for txid in executor.read().unwrap().unconfirmed_txs.iter() {
-                unconfirmed_txs.insert(*txid);
+            let executor = executor.read().unwrap();
+            for txid in executor.unconfirmed_txs.iter() {
+                match &executor.execute_results[*txid] {
+                    Ok(state) => {
+                        unconfirmed_txs.insert(
+                            *txid,
+                            PreUnconfirmedContext {
+                                read_set: executor.read_set[*txid].clone(),
+                                write_set: executor.write_set[*txid].clone(),
+                                execute_state: state.clone(),
+                            },
+                        );
+                    }
+                    Err(_) => {
+                        return Err(GrevmError::UnreachableError(String::from(
+                            "Didn't take failed transaction as conflict",
+                        )));
+                    }
+                }
             }
         }
-        if let Some(min_txid) = unconfirmed_txs.first() {
+        if let Some((min_txid, _)) = unconfirmed_txs.first_key_value() {
             if *min_txid != self.num_finality_txs {
+                // Most likely, the execution of the smallest transaction failed in evm.transact()
+                // TODO(gaoxin): return the correct evm error
                 return Err(GrevmError::ExecutionError(String::from(
                     "Discontinuous finality transaction ID",
                 )));
@@ -202,38 +285,20 @@ where
                 "Can't finalize a transaction in an execution round",
             )));
         }
-        for txid in unconfirmed_txs {
-            if txid == self.num_finality_txs {
+        for (txid, ctx) in unconfirmed_txs.iter() {
+            if *txid == self.num_finality_txs {
+                self.execute_states.push(ctx.execute_state.clone());
                 self.num_finality_txs += 1;
             } else {
                 break;
             }
         }
-        // update the final conflict_txs and unconfirmed_txs
-        let mut conflict_txs = BTreeSet::new();
-        let mut unconfirmed_txs = BTreeSet::new();
-        for executor in &self.partition_executors {
-            let executor = executor.read().unwrap();
-            for txid in executor.conflict_txs.iter() {
-                conflict_txs.insert(*txid);
-            }
-            for txid in executor.unconfirmed_txs.iter() {
-                // we didn't delete the finality txs from executor.unconfirmed_txs for we no longer use
-                // maybe we should update if we use executor.unconfirmed_txs later
-                if *txid >= self.num_finality_txs {
-                    unconfirmed_txs.insert(*txid);
-                }
-            }
-        }
-        self.conflict_txs = conflict_txs.into_iter().collect();
-        self.unconfirmed_txs = unconfirmed_txs.into_iter().collect();
-        let validate_len =
-            self.num_finality_txs + self.conflict_txs.len() + self.unconfirmed_txs.len();
-        if validate_len != self.tx_batch_size {
-            Err(GrevmError::ExecutionError(String::from("Invalidate txs length")))
-        } else {
-            Ok(())
-        }
+        unconfirmed_txs.split_off(&self.num_finality_txs);
+        self.pre_unconfirmed_txs = unconfirmed_txs;
+
+        // update and pruning tx dependencies
+        self.update_and_pruning_dependency();
+        Ok(())
     }
 
     fn execute_remaining_sequential(&mut self) -> Result<(), GrevmError> {
@@ -264,6 +329,10 @@ where
     }
 
     fn parallel_execute(&mut self, hints: Vec<Vec<TxId>>) -> Result<(), GrevmError> {
+        if self.txs.len() < self.num_partitions {
+            return self.execute_remaining_sequential();
+        }
+
         for i in 0..MAX_NUM_ROUND {
             if self.num_finality_txs < self.txs.len() {
                 self.partition_transactions();
