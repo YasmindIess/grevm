@@ -9,7 +9,7 @@ use reth_revm::db::DbAccount;
 use reth_revm::{CacheState, EvmBuilder};
 
 use crate::hint::TxRWSet;
-use crate::storage::PartitionDB;
+use crate::storage::{PartitionDB, SchedulerDB};
 use crate::{LocationAndType, PartitionId, TransactionStatus, TxId};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -97,14 +97,12 @@ where
         spec_id: SpecId,
         partition_id: PartitionId,
         env: Env,
-        scheduler_cache: Arc<CacheState>,
-        database: DB,
+        scheduler_db: Arc<SchedulerDB<DB>>,
         txs: Arc<Vec<TxEnv>>,
         assigned_txs: Vec<TxId>,
     ) -> Self {
         let coinbase = env.block.coinbase.clone();
-        let partition_db = PartitionDB::new(coinbase.clone(), scheduler_cache, database);
-
+        let partition_db = PartitionDB::new(coinbase.clone(), scheduler_db);
         Self {
             spec_id,
             env,
@@ -126,10 +124,6 @@ where
 
     pub fn set_pre_round_ctx(&mut self, pre_round_context: Option<PreRoundContext>) {
         self.pre_round_ctx = pre_round_context;
-    }
-
-    pub fn generate_write_set(changes: &EvmState) -> HashSet<LocationAndType> {
-        todo!()
     }
 
     pub fn execute(&mut self) {
@@ -171,7 +165,7 @@ where
                         // update read set
                         self.read_set.push(evm.db_mut().take_read_set());
                         // update write set
-                        let write_set = Self::generate_write_set(&result_and_state.state);
+                        let write_set = evm.db().generate_write_set(&result_and_state.state);
                         if self.pre_round_ctx.is_some() {
                             update_write_set.extend(write_set.clone().into_iter());
                         }

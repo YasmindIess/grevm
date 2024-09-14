@@ -1,5 +1,5 @@
 use lazy_static::lazy_static;
-use revm_primitives::{Address, U256};
+use revm_primitives::{Address, B256, U256};
 use tokio::runtime::{Builder, Runtime};
 
 mod grevm_test;
@@ -33,7 +33,7 @@ type TxId = usize;
 enum LocationAndType {
     Basic(Address),
     Storage(Address, U256),
-    Code(Address),
+    Code(B256 /* code_hash */),
 }
 
 #[derive(Debug)]

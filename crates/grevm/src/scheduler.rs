@@ -31,8 +31,7 @@ where
     coinbase: Address,
     txs: Arc<Vec<TxEnv>>,
 
-    cache: Option<Arc<CacheState>>,
-    database: DB,
+    database: Arc<SchedulerDB<DB>>,
 
     parallel_execution_hints: ParallelExecutionHints,
 
@@ -53,7 +52,7 @@ where
 
 impl<DB> GrevmScheduler<DB>
 where
-    DB: DatabaseRef + Clone + Send + Sync + 'static,
+    DB: DatabaseRef + Send + Sync + 'static,
     DB::Error: Send + Sync + Display,
 {
     pub fn new(spec_id: SpecId, env: Env, db: DB, txs: Vec<TxEnv>) -> Self {
@@ -66,8 +65,7 @@ where
             env,
             coinbase,
             txs: Arc::new(txs),
-            cache: Some(Arc::new(CacheState::default())),
-            database: db,
+            database: Arc::new(SchedulerDB::new(db)),
             parallel_execution_hints,
             tx_dependencies: TxDependency::new(),
             num_partitions,
@@ -132,7 +130,6 @@ where
                 self.spec_id.clone(),
                 partition_id,
                 self.env.clone(),
-                self.cache.as_ref().unwrap().clone(),
                 self.database.clone(),
                 self.txs.clone(),
                 self.partitioned_txs[partition_id].clone(),
@@ -153,8 +150,8 @@ where
         });
         // validate transactions
         // TODO(gravity_nekomoto): Merge changed state of finality txs
-        // MUST drop the `PartitionExecutor::scheduler_cache` before make mut
-        // let cache_mut = Arc::make_mut(&mut self.cache);
+        // MUST drop the `PartitionExecutor::scheduler_db` before get mut
+        // let db_mut = Arc::get_mut(&mut self.database).expect(...);
         self.validate_transactions()
     }
 
@@ -304,10 +301,10 @@ where
     fn execute_remaining_sequential(&mut self) -> Result<(), GrevmError> {
         assert_eq!(self.num_finality_txs, self.execute_states.len());
         // execute remaining txs
-        let cache = Arc::into_inner(self.cache.take().unwrap())
-            .expect("cache is shared by other threads/struct here, indicating bugs");
+        let database = Arc::get_mut(&mut self.database)
+            .expect("database is shared by other threads/struct here, indicating bugs");
         let mut evm = EvmBuilder::default()
-            .with_db(SchedulerDB::new(cache, self.database.clone()))
+            .with_db(database)
             .with_spec_id(self.spec_id)
             .with_env(Box::new(self.env.clone()))
             .build();
