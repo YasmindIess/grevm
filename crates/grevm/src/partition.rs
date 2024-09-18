@@ -3,10 +3,10 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use revm_primitives::db::{Database, DatabaseRef};
-use revm_primitives::{Address, EVMResult, Env, EvmState, ResultAndState, SpecId, TxEnv, U256};
+use revm_primitives::{Address, EVMResult, Env, ResultAndState, SpecId, TxEnv, U256};
 
 use reth_revm::db::DbAccount;
-use reth_revm::{CacheState, EvmBuilder};
+use reth_revm::EvmBuilder;
 
 use crate::hint::TxRWSet;
 use crate::storage::{PartitionDB, SchedulerDB};
@@ -33,11 +33,17 @@ pub struct Partition {
 /// Add some binary search methods for ordered vectors
 pub trait OrderedVectorExt<E> {
     fn has(&self, element: &E) -> bool;
+
+    fn index(&self, element: &E) -> usize;
 }
 
 impl<E: Ord> OrderedVectorExt<E> for Vec<E> {
     fn has(&self, element: &E) -> bool {
         self.binary_search(element).is_ok()
+    }
+
+    fn index(&self, element: &E) -> usize {
+        self.binary_search(element).unwrap()
     }
 }
 

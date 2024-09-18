@@ -7,7 +7,7 @@ use std::sync::{Arc, RwLock};
 use revm_primitives::db::{Database, DatabaseRef};
 use revm_primitives::{Address, Env, ResultAndState, SpecId, TxEnv};
 
-use reth_revm::{CacheState, EvmBuilder};
+use reth_revm::EvmBuilder;
 
 use crate::hint::ParallelExecutionHints;
 use crate::partition::{
@@ -203,11 +203,12 @@ where
                     let mut executor = executor.write().unwrap();
                     let executor = executor.deref_mut();
 
-                    for (txid, rs) in executor.assigned_txs.iter().zip(executor.read_set.iter()) {
-                        let mut conflict = executor.execute_results[*txid].is_err();
+                    for (index, rs) in executor.read_set.iter().enumerate() {
+                        let txid = executor.assigned_txs[index];
+                        let mut conflict = executor.execute_results[txid].is_err();
                         if conflict {
                             // Transactions that fail in partition executor are in conflict state
-                            executor.conflict_txs.push(*txid);
+                            executor.conflict_txs.push(txid);
                         }
                         let mut updated_dependencies = BTreeSet::new();
                         for location in rs {
@@ -219,7 +220,7 @@ where
                                         && (!executor.assigned_txs.has(previous_txid)
                                             || executor.conflict_txs.has(previous_txid))
                                     {
-                                        executor.conflict_txs.push(*txid);
+                                        executor.conflict_txs.push(txid);
                                         conflict = true;
                                     }
                                 }
@@ -227,9 +228,13 @@ where
                         }
                         executor.tx_dependency.push(updated_dependencies);
                         if !conflict {
-                            executor.unconfirmed_txs.push(*txid);
+                            executor.unconfirmed_txs.push(txid);
                         }
                     }
+                    assert_eq!(
+                        executor.unconfirmed_txs.len() + executor.conflict_txs.len(),
+                        executor.assigned_txs.len()
+                    );
                 }));
             }
             futures::future::join_all(tasks).await;
@@ -239,20 +244,21 @@ where
         for executor in &self.partition_executors {
             let executor = executor.read().unwrap();
             for txid in executor.unconfirmed_txs.iter() {
-                match &executor.execute_results[*txid] {
+                let index = executor.assigned_txs.index(txid);
+                match &executor.execute_results[index] {
                     Ok(state) => {
                         unconfirmed_txs.insert(
                             *txid,
                             PreUnconfirmedContext {
-                                read_set: executor.read_set[*txid].clone(),
-                                write_set: executor.write_set[*txid].clone(),
+                                read_set: executor.read_set[index].clone(),
+                                write_set: executor.write_set[index].clone(),
                                 execute_state: state.clone(),
                             },
                         );
                     }
                     Err(_) => {
                         return Err(GrevmError::UnreachableError(String::from(
-                            "Didn't take failed transaction as conflict",
+                            "Should take failed transaction as conflict",
                         )));
                     }
                 }
