@@ -11,8 +11,8 @@ pub type WriteKVSet = BTreeMap<Address, Option<DbAccount>>;
 #[derive(Debug, Default)]
 pub struct TxRWSet {
     // the key contains the address prefix
-    read_kv_set: RefCell<ReadKVSet>,
-    write_kv_set: RefCell<WriteKVSet>,
+    pub read_kv_set: RefCell<ReadKVSet>,
+    pub write_kv_set: RefCell<WriteKVSet>,
 }
 
 enum RWType {
@@ -46,7 +46,7 @@ impl TxRWSet {
 
 #[derive(Debug, Default)]
 pub struct ParallelExecutionHints {
-    txs_hint: Vec<TxRWSet>,
+    pub txs_hint: Vec<TxRWSet>,
 }
 
 impl ParallelExecutionHints {

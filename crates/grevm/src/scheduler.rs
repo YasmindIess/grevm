@@ -58,6 +58,7 @@ where
     pub fn new(spec_id: SpecId, env: Env, db: DB, txs: Vec<TxEnv>) -> Self {
         let coinbase = env.block.coinbase.clone();
         let parallel_execution_hints = ParallelExecutionHints::new(&txs);
+        let tx_dependencies = TxDependency::new(&parallel_execution_hints);
         let num_partitions = *CPU_CORES * 2 + 1; // 2 * cpu + 1 for initial partition number
         Self {
             tx_batch_size: txs.len(),
@@ -67,7 +68,7 @@ where
             txs: Arc::new(txs),
             database: Arc::new(SchedulerDB::new(db)),
             parallel_execution_hints,
-            tx_dependencies: TxDependency::new(),
+            tx_dependencies,
             num_partitions,
             partitioned_txs: vec![],
             partition_executors: vec![],
@@ -79,20 +80,8 @@ where
 
     pub fn partition_transactions(&mut self) {
         // compute and assign partitioned_txs
-    }
-
-    // initialize dependencies:
-    // 1. txs without contract can generate dependencies from 'from/to' address
-    // 2. consensus can build the dependencies(hints) of txs with contract
-    pub fn init_tx_dependencies(&mut self, hints: ParallelExecutionHints, partition_count: usize) {
-        self.parallel_execution_hints = hints;
-        self.tx_dependencies.generate_tx_dependency(&self.parallel_execution_hints);
-        self.tx_dependencies.fetch_best_partitions(partition_count);
-    }
-
-    fn split_partitions_with_tx_dependency(&mut self) {
-        // TODO(gravity_richard.zhz): Split to dependency
         self.partitioned_txs = self.tx_dependencies.fetch_best_partitions(self.num_partitions);
+        self.num_partitions = self.partitioned_txs.len();
     }
 
     pub(crate) fn update_partition_status(&self) {
@@ -194,7 +183,7 @@ where
                 }
             }
         }
-        self.tx_dependencies.update_tx_dependency(new_dependency, num_finality_txs, None);
+        self.tx_dependencies.update_tx_dependency(new_dependency, num_finality_txs);
     }
 
     /// verification of transaction state after each round
