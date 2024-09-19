@@ -1,22 +1,34 @@
 use std::collections::{btree_map, hash_map, BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+use reth_revm::db::states::bundle_state::BundleRetention;
 use reth_revm::db::states::CacheAccount;
+use reth_revm::db::{BundleState, PlainAccount};
 use revm_primitives::db::{Database, DatabaseRef};
 use revm_primitives::{Account, AccountInfo, Bytecode, EvmState, B256, BLOCK_HASH_HISTORY};
 
 use reth_primitives::{Address, U256};
-use reth_revm::CacheState;
+use reth_revm::{CacheState, TransitionAccount, TransitionState};
 
 use crate::{GREVM_RUNTIME, LocationAndType};
 
-pub struct SchedulerDB<DB> {
+pub(crate) struct SchedulerDB<DB> {
     /// Cache the committed data of finality txns and the read-only data during execution after each
     /// round of execution. Used as the initial state for the next round of partition executors.
     /// When fall back to sequential execution, used as cached state contains both changed from evm
     /// execution and cached/loaded account/storages.
     pub cache: CacheState,
     pub database: DB,
+    /// Block state, it aggregates transactions transitions into one state.
+    ///
+    /// Build reverts and state that gets applied to the state.
+    // TODO(gravity_nekomoto): Try to directly generate bunlde state from cache, rather than
+    // transitions.
+    pub transition_state: Option<TransitionState>,
+    /// After block is finishes we merge those changes inside bundle.
+    /// Bundle is used to update database and create changesets.
+    /// Bundle state can be set on initialization if we want to use preloaded bundle.
+    pub bundle_state: BundleState,
     /// If EVM asks for block hash we will first check if they are found here.
     /// and then ask the database.
     ///
@@ -26,13 +38,77 @@ pub struct SchedulerDB<DB> {
 }
 
 impl<DB> SchedulerDB<DB> {
-    pub fn new(database: DB) -> Self {
-        Self { cache: CacheState::default(), database, block_hashes: BTreeMap::new() }
+    pub(crate) fn new(database: DB) -> Self {
+        Self {
+            cache: CacheState::default(),
+            database,
+            transition_state: Some(TransitionState::default()),
+            bundle_state: BundleState::default(),
+            block_hashes: BTreeMap::new(),
+        }
     }
 
-    /// Fall back to sequential execute
-    pub fn commit(&mut self, changes: HashMap<Address, Account>) {
-        todo!()
+    /// Commit transitions to the cache state and transition state after one round of execution.
+    pub(crate) fn commit_transition(&mut self, transitions: Vec<(Address, TransitionAccount)>) {
+        for (address, account) in &transitions {
+            let new_storage = account.storage.iter().map(|(k, s)| (*k, s.present_value));
+            if let Some(entry) = self.cache.accounts.get_mut(address) {
+                if let Some(new_info) = &account.info {
+                    assert!(!account.storage_was_destroyed);
+                    if let Some(read_account) = entry.account.as_mut() {
+                        // account is loaded
+                        read_account.info = new_info.clone();
+                        read_account.storage.extend(new_storage);
+                    } else {
+                        // account is loaded not existing
+                        entry.account = Some(PlainAccount {
+                            info: new_info.clone(),
+                            storage: new_storage.collect(),
+                        });
+                    }
+                } else {
+                    assert!(account.storage_was_destroyed);
+                    entry.account = None;
+                }
+                entry.status = account.status;
+            } else {
+                self.cache.accounts.insert(
+                    *address,
+                    CacheAccount {
+                        account: account.info.as_ref().map(|info| PlainAccount {
+                            info: info.clone(),
+                            storage: new_storage.collect(),
+                        }),
+                        status: account.status,
+                    },
+                );
+            }
+        }
+
+        self.apply_transition(transitions);
+    }
+
+    /// Fall back to sequential execute.
+    pub(crate) fn commit(&mut self, changes: HashMap<Address, Account>) {
+        let transitions = self.cache.apply_evm_state(changes);
+        self.apply_transition(transitions);
+    }
+
+    fn apply_transition(&mut self, transitions: Vec<(Address, TransitionAccount)>) {
+        // add transition to transition state.
+        if let Some(s) = self.transition_state.as_mut() {
+            s.add_transitions(transitions)
+        }
+    }
+
+    /// Take all transitions and merge them inside bundle state.
+    /// This action will create final post state and all reverts so that
+    /// we at any time revert state of bundle to the state before transition
+    /// is applied.
+    pub(crate) fn merge_transitions(&mut self, retention: BundleRetention) {
+        if let Some(transition_state) = self.transition_state.as_mut().map(TransitionState::take) {
+            self.bundle_state.apply_transitions_and_create_reverts(transition_state, retention);
+        }
     }
 }
 
@@ -137,7 +213,7 @@ where
     }
 }
 
-pub struct PartitionDB<DB> {
+pub(crate) struct PartitionDB<DB> {
     pub coinbase: Address,
 
     // partition internal cache
@@ -150,7 +226,7 @@ pub struct PartitionDB<DB> {
 }
 
 impl<DB> PartitionDB<DB> {
-    pub fn new(coinbase: Address, scheduler_db: Arc<SchedulerDB<DB>>) -> Self {
+    pub(crate) fn new(coinbase: Address, scheduler_db: Arc<SchedulerDB<DB>>) -> Self {
         Self {
             coinbase,
             cache: CacheState::default(),
@@ -161,12 +237,12 @@ impl<DB> PartitionDB<DB> {
     }
 
     /// consume the read set after evm.transact() for each tx
-    pub fn take_read_set(&mut self) -> HashSet<LocationAndType> {
+    pub(crate) fn take_read_set(&mut self) -> HashSet<LocationAndType> {
         core::mem::take(&mut self.tx_read_set)
     }
 
     /// Generate the write set after evm.transact() for each tx
-    pub fn generate_write_set(&self, changes: &EvmState) -> HashSet<LocationAndType> {
+    pub(crate) fn generate_write_set(&self, changes: &EvmState) -> HashSet<LocationAndType> {
         let mut write_set = HashSet::new();
         for (address, account) in changes {
             if account.is_selfdestructed() {
@@ -207,8 +283,13 @@ impl<DB> PartitionDB<DB> {
         write_set
     }
 
-    // temporary commit the state change after evm.transact() for each tx
-    pub fn temporary_commit(&mut self, changes: &EvmState) {}
+    /// Temporary commit the state change after evm.transact() for each tx
+    pub(crate) fn temporary_commit(
+        &mut self,
+        changes: EvmState,
+    ) -> Vec<(Address, TransitionAccount)> {
+        self.cache.apply_evm_state(changes)
+    }
 }
 
 /// Used to build evm, and hook the read operations

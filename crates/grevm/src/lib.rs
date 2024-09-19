@@ -1,5 +1,6 @@
 use lazy_static::lazy_static;
-use revm_primitives::{Address, B256, U256};
+use reth_revm::TransitionAccount;
+use revm_primitives::{Address, EVMResultGeneric, ExecutionResult, B256, U256};
 use tokio::runtime::{Builder, Runtime};
 
 mod grevm_test;
@@ -55,3 +56,13 @@ pub enum GrevmError {
     ExecutionError(String),
     UnreachableError(String),
 }
+
+#[derive(Debug, Clone)]
+pub struct ResultAndTransition {
+    /// Status of execution
+    pub result: ExecutionResult,
+    /// State that got updated
+    pub transition: Vec<(Address, TransitionAccount)>,
+}
+
+pub type GrevmResult<DBError> = EVMResultGeneric<ResultAndTransition, DBError>;

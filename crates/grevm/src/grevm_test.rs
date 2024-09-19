@@ -37,7 +37,7 @@ struct DBError {
 }
 
 impl DBError {
-    pub fn new(msg: String) -> Self {
+    pub(crate) fn new(msg: String) -> Self {
         DBError { msg }
     }
 }
@@ -141,11 +141,11 @@ where
     DB: DatabaseRef + Send + Sync + 'static,
     DB::Error: Send + Sync,
 {
-    pub fn new(partition_id: usize, db: DB) -> Self {
+    pub(crate) fn new(partition_id: usize, db: DB) -> Self {
         Self { partition_id, db: CacheDB::new(db) }
     }
 
-    pub fn execute(&mut self) {
+    pub(crate) fn execute(&mut self) {
         let mut rng = rand::thread_rng();
         for _ in 0..10 {
             let key = rng.gen_range(0..100);
@@ -171,19 +171,15 @@ where
     DB: DatabaseRef + Send + Sync + 'static,
     DB::Error: Send + Sync,
 {
-    pub fn new(db: DB) -> Self {
+    pub(crate) fn new(db: DB) -> Self {
         Self { state: Arc::new(CacheDB::new(db)), executors: Default::default() }
     }
 
-    pub fn new_yield(db: DB) -> Self {
+    pub(crate) fn new_yield(db: DB) -> Self {
         Self { state: Arc::new(CacheDB::new_yield(db)), executors: Default::default() }
     }
 
-    async fn executor_execute(executor: Arc<RwLock<PartitionExecutor<Arc<CacheDB<DB>>>>>) {
-        executor.write().unwrap().execute();
-    }
-
-    pub fn parallel_execute(&mut self) {
+    pub(crate) fn parallel_execute(&mut self) {
         for partition_id in 0..10 {
             self.executors.push(Arc::new(RwLock::new(PartitionExecutor::new(
                 partition_id,

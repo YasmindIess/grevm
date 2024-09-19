@@ -4,10 +4,10 @@ use std::ops::DerefMut;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
-use revm_primitives::db::{Database, DatabaseRef};
-use revm_primitives::{Address, Env, ResultAndState, SpecId, TxEnv};
+use revm_primitives::db::DatabaseRef;
+use revm_primitives::{Address, Env, SpecId, TxEnv};
 
-use reth_revm::EvmBuilder;
+use reth_revm::{CacheState, EvmBuilder};
 
 use crate::hint::ParallelExecutionHints;
 use crate::partition::{
@@ -44,7 +44,6 @@ where
     partition_executors: Vec<Arc<RwLock<PartitionExecutor<DB>>>>,
 
     num_finality_txs: usize,
-    execute_states: Vec<ResultAndState>,
 
     // update after each round
     pre_unconfirmed_txs: BTreeMap<TxId, PreUnconfirmedContext>,
@@ -73,12 +72,11 @@ where
             partitioned_txs: vec![],
             partition_executors: vec![],
             num_finality_txs: 0,
-            execute_states: vec![],
             pre_unconfirmed_txs: BTreeMap::new(),
         }
     }
 
-    pub fn partition_transactions(&mut self) {
+    pub(crate) fn partition_transactions(&mut self) {
         // compute and assign partitioned_txs
         self.partitioned_txs = self.tx_dependencies.fetch_best_partitions(self.num_partitions);
         self.num_partitions = self.partitioned_txs.len();
@@ -172,7 +170,6 @@ where
             let executor = executor.read().unwrap();
             for (txid, dep) in executor.assigned_txs.iter().zip(executor.tx_dependency.iter()) {
                 if *txid >= num_finality_txs {
-                    let tmp = dep.clone();
                     // pruning the tx that is finality state
                     new_dependency[*txid - num_finality_txs] = dep
                         .clone()
@@ -277,24 +274,67 @@ where
                 "Can't finalize a transaction in an execution round",
             )));
         }
-        for (txid, ctx) in unconfirmed_txs.iter() {
+
+        for txid in unconfirmed_txs.keys() {
             if *txid == self.num_finality_txs {
-                self.execute_states.push(ctx.execute_state.clone());
                 self.num_finality_txs += 1;
             } else {
                 break;
             }
         }
-        unconfirmed_txs.split_off(&self.num_finality_txs);
-        self.pre_unconfirmed_txs = unconfirmed_txs;
+
+        // TODO(gravity): early stop if num_finality_txs == txs.len()
+
+        self.pre_unconfirmed_txs = unconfirmed_txs.split_off(&self.num_finality_txs);
+        // Now `unconfirmed_txs` only contains the txs that are finality in this round
 
         // update and pruning tx dependencies
         self.update_and_pruning_dependency();
+
+        let partition_state: Vec<CacheState> = self
+            .partition_executors
+            .iter()
+            .map(|executor| {
+                let mut executor = executor.write().unwrap();
+                std::mem::take(&mut executor.partition_db.cache)
+            })
+            .collect();
+
+        // MUST drop the `PartitionExecutor::scheduler_db` before get mut
+        self.partition_executors.clear();
+        let database = Arc::get_mut(&mut self.database)
+            .expect("database is shared by other threads/struct here, indicating bugs");
+
+        Self::merge_not_modified_state(&mut database.cache, partition_state);
+
+        for ctx in unconfirmed_txs.into_values() {
+            database.commit_transition(ctx.execute_state.transition);
+        }
+
         Ok(())
     }
 
+    /// Merge not modified state from partition to scheduler. These data are just loaded from
+    /// database, so we can merge them to state as original value for next round.
+    fn merge_not_modified_state(state: &mut CacheState, partition_state: Vec<CacheState>) {
+        for partition in partition_state {
+            // merge account state that is not modified
+            for (address, account) in partition.accounts {
+                if account.status.is_not_modified() && state.accounts.get(&address).is_none() {
+                    state.accounts.insert(address, account);
+                }
+            }
+
+            // merge contract code
+            for (hash, code) in partition.contracts {
+                if state.contracts.get(&hash).is_none() {
+                    state.contracts.insert(hash, code);
+                }
+            }
+        }
+    }
+
     fn execute_remaining_sequential(&mut self) -> Result<(), GrevmError> {
-        assert_eq!(self.num_finality_txs, self.execute_states.len());
         // execute remaining txs
         let database = Arc::get_mut(&mut self.database)
             .expect("database is shared by other threads/struct here, indicating bugs");
@@ -312,7 +352,6 @@ where
             match evm.transact() {
                 Ok(result_and_state) => {
                     evm.db_mut().commit(result_and_state.state.clone());
-                    self.execute_states.push(result_and_state);
                 }
                 Err(err) => return Err(GrevmError::ExecutionError(err.to_string())),
             }

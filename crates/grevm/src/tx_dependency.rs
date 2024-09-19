@@ -6,7 +6,7 @@ use revm_primitives::Address;
 use crate::hint::ParallelExecutionHints;
 use crate::TxId;
 
-pub struct TxDependency {
+pub(crate) struct TxDependency {
     // if txi <- txj, then tx_dependency[txj - num_finality_txs].push(txi)
     tx_dependency: Vec<Vec<TxId>>,
     // when a tx is in finality state, we don't need to store their dependencies

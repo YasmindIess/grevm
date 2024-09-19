@@ -5,11 +5,11 @@ use revm_primitives::TxEnv;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-pub type ReadKVSet = BTreeMap<Address, Option<DbAccount>>;
-pub type WriteKVSet = BTreeMap<Address, Option<DbAccount>>;
+pub(crate) type ReadKVSet = BTreeMap<Address, Option<DbAccount>>;
+pub(crate) type WriteKVSet = BTreeMap<Address, Option<DbAccount>>;
 
 #[derive(Debug, Default)]
-pub struct TxRWSet {
+pub(crate) struct TxRWSet {
     // the key contains the address prefix
     pub read_kv_set: RefCell<ReadKVSet>,
     pub write_kv_set: RefCell<WriteKVSet>,
@@ -50,11 +50,11 @@ pub struct ParallelExecutionHints {
 }
 
 impl ParallelExecutionHints {
-    pub fn new(txs: &Vec<TxEnv>) -> Self {
+    pub(crate) fn new(txs: &Vec<TxEnv>) -> Self {
         let mut hints: Vec<TxRWSet> = Vec::with_capacity(txs.len());
 
         for (index, tx_env) in txs.iter().enumerate() {
-            let mut rw_set = TxRWSet::default();
+            let rw_set = TxRWSet::default();
             rw_set.insert_key_value(&tx_env.caller, None, RWType::ReadWrite);
             if let TxKind::Call(to_address) = tx_env.transact_to {
                 rw_set.insert_key_value(&to_address, None, RWType::ReadWrite);
@@ -65,7 +65,7 @@ impl ParallelExecutionHints {
         ParallelExecutionHints { txs_hint: hints }
     }
 
-    pub fn update_tx_hint(&mut self, tx_index: usize, new_tx_rw_set: TxRWSet) {
+    pub(crate) fn update_tx_hint(&mut self, tx_index: usize, new_tx_rw_set: TxRWSet) {
         self.txs_hint[tx_index].read_kv_set = new_tx_rw_set.read_kv_set;
         self.txs_hint[tx_index].write_kv_set = new_tx_rw_set.write_kv_set;
     }
