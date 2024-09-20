@@ -1,6 +1,6 @@
 use lazy_static::lazy_static;
 use reth_revm::TransitionAccount;
-use revm_primitives::{Address, EVMResultGeneric, ExecutionResult, B256, U256};
+use revm_primitives::{Address, EVMError, EVMResultGeneric, ExecutionResult, B256, U256};
 use tokio::runtime::{Builder, Runtime};
 
 mod grevm_test;
@@ -52,7 +52,8 @@ pub struct PartitionIndex {
 }
 
 #[derive(Debug)]
-pub enum GrevmError {
+pub enum GrevmError<DBError> {
+    EvmError(EVMError<DBError>),
     ExecutionError(String),
     UnreachableError(String),
 }
@@ -63,6 +64,8 @@ pub struct ResultAndTransition {
     pub result: ExecutionResult,
     /// State that got updated
     pub transition: Vec<(Address, TransitionAccount)>,
+    /// Rewards to miner
+    pub rewards: u128,
 }
 
 pub type GrevmResult<DBError> = EVMResultGeneric<ResultAndTransition, DBError>;

@@ -55,6 +55,9 @@ impl ParallelExecutionHints {
 
         for (index, tx_env) in txs.iter().enumerate() {
             let rw_set = TxRWSet::default();
+            // Causing transactions that call the same contract to inevitably
+            // conflict with each other. Is this behavior reasonable?
+            // TODO(gaoxin): optimize contract account
             rw_set.insert_key_value(&tx_env.caller, None, RWType::ReadWrite);
             if let TxKind::Call(to_address) = tx_env.transact_to {
                 rw_set.insert_key_value(&to_address, None, RWType::ReadWrite);

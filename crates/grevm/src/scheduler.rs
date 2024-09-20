@@ -5,7 +5,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
 use revm_primitives::db::DatabaseRef;
-use revm_primitives::{Address, Env, SpecId, TxEnv};
+use revm_primitives::{Address, EVMError, Env, SpecId, TxEnv};
 
 use reth_revm::{CacheState, EvmBuilder};
 
@@ -52,7 +52,7 @@ where
 impl<DB> GrevmScheduler<DB>
 where
     DB: DatabaseRef + Send + Sync + 'static,
-    DB::Error: Send + Sync + Display,
+    DB::Error: Send + Sync + Clone,
 {
     pub fn new(spec_id: SpecId, env: Env, db: DB, txs: Vec<TxEnv>) -> Self {
         let coinbase = env.block.coinbase.clone();
@@ -110,7 +110,7 @@ where
         }
     }
 
-    fn round_execute(&mut self) -> Result<(), GrevmError> {
+    fn round_execute(&mut self) -> Result<(), GrevmError<DB::Error>> {
         self.partitioned_txs.clear();
         for partition_id in 0..self.num_partitions {
             let mut executor = PartitionExecutor::new(
@@ -186,7 +186,7 @@ where
     /// verification of transaction state after each round
     /// Because after each round execution, the read-write set is no longer updated.
     /// We can check in parallel whether the read set is out of bounds.
-    fn validate_transactions(&mut self) -> Result<(), GrevmError> {
+    fn validate_transactions(&mut self) -> Result<(), GrevmError<DB::Error>> {
         GREVM_RUNTIME.block_on(async {
             let mut tasks = vec![];
             let merged_write_set = Arc::new(self.merge_write_set());
@@ -240,6 +240,11 @@ where
         let mut unconfirmed_txs = BTreeMap::new();
         for executor in &self.partition_executors {
             let executor = executor.read().unwrap();
+            if executor.assigned_txs[0] == self.num_finality_txs {
+                if let Err(err) = &executor.execute_results[0] {
+                    return Err(GrevmError::EvmError(err.clone()));
+                }
+            }
             for txid in executor.unconfirmed_txs.iter() {
                 let index = executor.assigned_txs.index(txid);
                 match &executor.execute_results[index] {
@@ -264,7 +269,6 @@ where
         if let Some((min_txid, _)) = unconfirmed_txs.first_key_value() {
             if *min_txid != self.num_finality_txs {
                 // Most likely, the execution of the smallest transaction failed in evm.transact()
-                // TODO(gaoxin): return the correct evm error
                 return Err(GrevmError::ExecutionError(String::from(
                     "Discontinuous finality transaction ID",
                 )));
@@ -307,9 +311,19 @@ where
 
         Self::merge_not_modified_state(&mut database.cache, partition_state);
 
+        let mut rewards: u128 = 0;
         for ctx in unconfirmed_txs.into_values() {
+            rewards += ctx.execute_state.rewards;
             database.commit_transition(ctx.execute_state.transition);
         }
+        // Each transaction updates three accounts: from, to, and coinbase.
+        // If every tx updates the coinbase account, it will cause conflicts across all txs.
+        // Therefore, we handle miner rewards separately. We don't record miner’s address in r/w set,
+        // and track the rewards for the miner for each transaction separately.
+        // The miner’s account is only updated after validation by SchedulerDB.increment_balances
+        database
+            .increment_balances(vec![(self.coinbase, rewards)])
+            .map_err(|err| GrevmError::EvmError(EVMError::Database(err)))?;
 
         Ok(())
     }
@@ -334,7 +348,7 @@ where
         }
     }
 
-    fn execute_remaining_sequential(&mut self) -> Result<(), GrevmError> {
+    fn execute_remaining_sequential(&mut self) -> Result<(), GrevmError<DB::Error>> {
         // execute remaining txs
         let database = Arc::get_mut(&mut self.database)
             .expect("database is shared by other threads/struct here, indicating bugs");
@@ -353,13 +367,13 @@ where
                 Ok(result_and_state) => {
                     evm.db_mut().commit(result_and_state.state.clone());
                 }
-                Err(err) => return Err(GrevmError::ExecutionError(err.to_string())),
+                Err(err) => return Err(GrevmError::EvmError(err)),
             }
         }
         Ok(())
     }
 
-    fn parallel_execute(&mut self, hints: Vec<Vec<TxId>>) -> Result<(), GrevmError> {
+    fn parallel_execute(&mut self) -> Result<(), GrevmError<DB::Error>> {
         if self.txs.len() < self.num_partitions {
             return self.execute_remaining_sequential();
         }
@@ -367,6 +381,9 @@ where
         for i in 0..MAX_NUM_ROUND {
             if self.num_finality_txs < self.txs.len() {
                 self.partition_transactions();
+                if self.num_partitions == 1 {
+                    break;
+                }
                 self.round_execute()?;
             } else {
                 break;

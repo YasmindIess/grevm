@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use revm_primitives::db::DatabaseRef;
-use revm_primitives::{Address, Env, SpecId, TxEnv, U256};
+use revm_primitives::{Address, Env, SpecId, TxEnv, TxKind, U256};
 
 use reth_revm::db::DbAccount;
 use reth_revm::EvmBuilder;
@@ -93,8 +93,6 @@ where
     pub unconfirmed_txs: Vec<TxId>,
     pub tx_dependency: Vec<BTreeSet<TxId>>,
 
-    pub coinbase_rewards: Vec<U256>,
-
     pub pre_round_ctx: Option<PreRoundContext>,
 }
 
@@ -127,7 +125,6 @@ where
             conflict_txs: vec![],
             unconfirmed_txs: vec![],
             tx_dependency: vec![],
-            coinbase_rewards: vec![],
             pre_round_ctx: None,
         }
     }
@@ -144,8 +141,20 @@ where
             .with_env(Box::new(self.env.clone()))
             .build();
         for txid in &self.assigned_txs {
+            let mut miner_involved = false;
             if let Some(tx) = self.txs.get(*txid) {
                 *evm.tx_mut() = tx.clone();
+                // If the transaction includes the miner’s address,
+                // we need to record the miner’s address in both the write and read sets,
+                // and fully track the updates to the miner’s account.
+                if self.coinbase == tx.caller {
+                    miner_involved = true;
+                }
+                if let TxKind::Call(to) = tx.transact_to {
+                    if self.coinbase == to {
+                        miner_involved = true;
+                    }
+                }
             } else {
                 panic!("Wrong transactions ID");
             }
@@ -163,28 +172,36 @@ where
                     if read_set.is_disjoint(&update_write_set) {
                         self.read_set.push(read_set);
                         self.write_set.push(write_set);
+                        // TODO(gravity_nekomoto): should temporary_commit the state
                         self.execute_results.push(Ok(execute_state));
                         should_rerun = false;
                     }
                 }
             }
             if should_rerun {
+                evm.db_mut().miner_involved = miner_involved;
                 let result = evm.transact();
                 match result {
-                    Ok(result_and_state) => {
+                    Ok(mut result_and_state) => {
                         // update read set
                         self.read_set.push(evm.db_mut().take_read_set());
                         // update write set
-                        let write_set = evm.db().generate_write_set(&result_and_state.state);
+                        let (write_set, rewards) =
+                            evm.db().generate_write_set(&result_and_state.state);
                         if self.pre_round_ctx.is_some() {
                             update_write_set.extend(write_set.clone().into_iter());
                         }
                         self.write_set.push(write_set);
+                        if rewards.is_some() {
+                            // remove miner's state if we handle rewards separately
+                            result_and_state.state.remove(&self.coinbase);
+                        }
                         // temporary commit to cache_db, to make use the remaining txs can read the updated data
                         let transition = evm.db_mut().temporary_commit(result_and_state.state);
                         self.execute_results.push(Ok(ResultAndTransition {
                             result: result_and_state.result,
                             transition,
+                            rewards: rewards.unwrap_or(0),
                         }));
                     }
                     Err(err) => {

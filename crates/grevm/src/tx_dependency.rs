@@ -105,7 +105,11 @@ impl TxDependency {
                 }
             }
         }
-        partitioned_group.into_iter().map(|bs| bs.into_iter().collect()).collect()
+        partitioned_group
+            .into_iter()
+            .filter(|bs| !bs.is_empty())
+            .map(|bs| bs.into_iter().collect())
+            .collect()
     }
 
     pub fn update_tx_dependency(&mut self, tx_dependency: Vec<Vec<TxId>>, num_finality_txs: usize) {

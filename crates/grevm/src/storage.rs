@@ -22,7 +22,7 @@ pub(crate) struct SchedulerDB<DB> {
     /// Block state, it aggregates transactions transitions into one state.
     ///
     /// Build reverts and state that gets applied to the state.
-    // TODO(gravity_nekomoto): Try to directly generate bunlde state from cache, rather than
+    // TODO(gravity_nekomoto): Try to directly generate bundle state from cache, rather than
     // transitions.
     pub transition_state: Option<TransitionState>,
     /// After block is finishes we merge those changes inside bundle.
@@ -112,6 +112,37 @@ impl<DB> SchedulerDB<DB> {
     }
 }
 
+impl<DB> SchedulerDB<DB>
+where
+    DB: DatabaseRef,
+{
+    /// rewards are distributed to the miner, ommers, and the DAO.
+    /// TODO(gaoxin): Full block reward to block.beneficiary
+    pub fn increment_balances(
+        &mut self,
+        balances: impl IntoIterator<Item = (Address, u128)>,
+    ) -> Result<(), DB::Error> {
+        // make transition and update cache state
+        let mut transitions = Vec::new();
+        for (address, balance) in balances {
+            if balance == 0 {
+                continue;
+            }
+            let original_account = self.basic(address)?;
+            let mut cache_account = into_cache_account(original_account);
+            transitions.push((
+                address,
+                cache_account.increment_balance(balance).expect("Balance is not zero"),
+            ))
+        }
+        // append transition
+        if let Some(s) = self.transition_state.as_mut() {
+            s.add_transitions(transitions)
+        }
+        Ok(())
+    }
+}
+
 fn into_cache_account(account: Option<AccountInfo>) -> CacheAccount {
     match account {
         None => CacheAccount::new_loaded_not_existing(),
@@ -166,7 +197,7 @@ where
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
         match self.cache.accounts.entry(address) {
             hash_map::Entry::Vacant(entry) => {
-                let info = tokio::task::block_in_place(|| self.database.basic_ref(address))?;
+                let info = self.database.basic_ref(address)?;
                 Ok(entry.insert(into_cache_account(info)).account_info())
             }
             hash_map::Entry::Occupied(entry) => Ok(entry.get().account_info()),
@@ -177,8 +208,7 @@ where
         let res = match self.cache.contracts.entry(code_hash) {
             hash_map::Entry::Occupied(entry) => Ok(entry.get().clone()),
             hash_map::Entry::Vacant(entry) => {
-                let code =
-                    tokio::task::block_in_place(|| self.database.code_by_hash_ref(code_hash))?;
+                let code = self.database.code_by_hash_ref(code_hash)?;
                 entry.insert(code.clone());
                 Ok(code)
             }
@@ -194,10 +224,9 @@ where
         match self.block_hashes.entry(number) {
             btree_map::Entry::Occupied(entry) => Ok(*entry.get()),
             btree_map::Entry::Vacant(entry) => {
-                let ret = *entry
-                    .insert(tokio::task::block_in_place(|| self.database.block_hash_ref(number))?);
+                let ret = *entry.insert(self.database.block_hash_ref(number)?);
 
-                // prune all hashes that are older then BLOCK_HASH_HISTORY
+                // prune all hashes that are older than BLOCK_HASH_HISTORY
                 let last_block = number.saturating_sub(BLOCK_HASH_HISTORY);
                 while let Some(entry) = self.block_hashes.first_entry() {
                     if *entry.key() < last_block {
@@ -221,6 +250,8 @@ pub(crate) struct PartitionDB<DB> {
     pub scheduler_db: Arc<SchedulerDB<DB>>,
     pub block_hashes: BTreeMap<u64, B256>,
 
+    /// Does the miner participate in the transaction
+    pub miner_involved: bool,
     /// Record the read set of current tx, will be consumed after the execution of each tx
     tx_read_set: HashSet<LocationAndType>,
 }
@@ -232,6 +263,7 @@ impl<DB> PartitionDB<DB> {
             cache: CacheState::default(),
             scheduler_db,
             block_hashes: BTreeMap::new(),
+            miner_involved: false,
             tx_read_set: HashSet::new(),
         }
     }
@@ -242,7 +274,11 @@ impl<DB> PartitionDB<DB> {
     }
 
     /// Generate the write set after evm.transact() for each tx
-    pub(crate) fn generate_write_set(&self, changes: &EvmState) -> HashSet<LocationAndType> {
+    pub(crate) fn generate_write_set(
+        &self,
+        changes: &EvmState,
+    ) -> (HashSet<LocationAndType>, Option<u128>) {
+        let mut rewards: Option<u128> = None;
         let mut write_set = HashSet::new();
         for (address, account) in changes {
             if account.is_selfdestructed() {
@@ -252,27 +288,54 @@ impl<DB> PartitionDB<DB> {
                 // existing account in the `self.cache`?
                 assert!(!account.info.is_empty_code_hash());
                 write_set.insert(LocationAndType::Code(account.info.code_hash()));
+                // When a contract account is destroyed, its remaining balance is sent to a
+                // designated address, and the account’s balance becomes invalid.
+                // Defensive programming should be employed to prevent subsequent transactions
+                // from attempting to read the contract account’s basic information,
+                // which could lead to errors.
+                write_set.insert(LocationAndType::Basic(address.clone()));
+                continue;
+            }
+
+            // When fully tracking the updates to the miner’s account,
+            // we should set rewards = 0
+            if self.coinbase == *address && !self.miner_involved {
+                match self.cache.accounts.get(address) {
+                    Some(miner) => match miner.account.as_ref() {
+                        Some(miner) => {
+                            rewards = Some((account.info.balance - miner.info.balance).to());
+                        }
+                        None => panic!("Miner account not exist"),
+                    },
+                    None => panic!("Miner should be cached"),
+                }
                 continue;
             }
 
             if account.is_touched() {
                 let has_code = !account.info.is_empty_code_hash();
+                // is newly created contract
+                let mut new_contract_account = false;
 
                 if match self.cache.accounts.get(address) {
                     Some(read_account) => {
                         read_account.account.as_ref().map_or(true, |read_account| {
-                            (has_code && read_account.info.is_empty_code_hash()) // is newly created contract
+                            new_contract_account =
+                                has_code && read_account.info.is_empty_code_hash();
+                            new_contract_account
                                 || read_account.info.nonce != account.info.nonce
                                 || read_account.info.balance != account.info.balance
                         })
                     }
-                    None => true,
-                } {
-                    if has_code {
-                        write_set.insert(LocationAndType::Code(account.info.code_hash()));
-                    } else {
-                        write_set.insert(LocationAndType::Basic(*address));
+                    None => {
+                        new_contract_account = has_code;
+                        true
                     }
+                } {
+                    write_set.insert(LocationAndType::Basic(*address));
+                }
+                if new_contract_account {
+                    write_set.insert(LocationAndType::Code(account.info.code_hash()));
                 }
             }
 
@@ -280,7 +343,7 @@ impl<DB> PartitionDB<DB> {
                 write_set.insert(LocationAndType::Storage(*address, *slot));
             }
         }
-        write_set
+        (write_set, rewards)
     }
 
     /// Temporary commit the state change after evm.transact() for each tx
@@ -301,23 +364,32 @@ where
     type Error = DB::Error;
 
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        self.tx_read_set.insert(LocationAndType::Basic(address));
+        if address != self.coinbase || self.miner_involved {
+            self.tx_read_set.insert(LocationAndType::Basic(address));
+        }
 
         // 1. read from internal cache
-        match self.cache.accounts.entry(address) {
+        let result = match self.cache.accounts.entry(address) {
             hash_map::Entry::Vacant(entry) => {
                 // 2. read initial state of this round from scheduler cache
                 if let Some(account) = self.scheduler_db.cache.accounts.get(&address) {
-                    return Ok(entry.insert(account.clone()).account_info());
+                    Ok(entry.insert(account.clone()).account_info())
+                } else {
+                    // 3. read from origin database
+                    tokio::task::block_in_place(|| self.scheduler_db.database.basic_ref(address))
+                        .map(|info| entry.insert(into_cache_account(info)).account_info())
                 }
-
-                // 3. read from origin database
-                let info =
-                    tokio::task::block_in_place(|| self.scheduler_db.database.basic_ref(address))?;
-                return Ok(entry.insert(into_cache_account(info)).account_info());
             }
             hash_map::Entry::Occupied(entry) => Ok(entry.get().account_info()),
+        };
+        if let Ok(account) = &result {
+            if let Some(info) = account {
+                if info.code.is_some() {
+                    self.tx_read_set.insert(LocationAndType::Code(info.code_hash));
+                }
+            }
         }
+        result
     }
 
     fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
