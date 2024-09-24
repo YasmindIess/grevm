@@ -4,8 +4,6 @@ use lazy_static::lazy_static;
 use reth_revm::TransitionAccount;
 use revm_primitives::{Address, EVMError, EVMResultGeneric, ExecutionResult, B256, U256};
 use tokio::runtime::{Builder, Runtime};
-
-mod grevm_test;
 mod hint;
 mod partition;
 mod scheduler;

@@ -84,6 +84,9 @@ impl TxDependency {
                 weighted_group.entry(weight).or_default().push(group);
                 num_group += 1;
             }
+            if txid == 0 {
+                break;
+            }
             txid -= 1;
         }
 

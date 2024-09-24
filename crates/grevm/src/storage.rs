@@ -129,8 +129,11 @@ where
             if balance == 0 {
                 continue;
             }
-            let original_account = self.basic(address)?;
-            let mut cache_account = into_cache_account(original_account);
+            let cache_account = self
+                .cache
+                .accounts
+                .get_mut(&address)
+                .expect("All accounts should be present inside cache");
             transitions.push((
                 address,
                 cache_account.increment_balance(balance).expect("Balance is not zero"),

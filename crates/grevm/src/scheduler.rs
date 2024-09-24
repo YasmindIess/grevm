@@ -3,14 +3,14 @@ use std::ops::DerefMut;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
-use reth_revm::db::states::bundle_state::BundleRetention;
-use reth_revm::db::BundleState;
 use revm_primitives::db::DatabaseRef;
 use revm_primitives::Bytecode;
 use revm_primitives::{
     AccountInfo, Address, EVMError, Env, ExecutionResult, SpecId, TxEnv, B256, U256,
 };
 
+use reth_revm::db::states::bundle_state::BundleRetention;
+use reth_revm::db::BundleState;
 use reth_revm::{CacheState, EvmBuilder};
 
 use crate::hint::ParallelExecutionHints;
@@ -172,7 +172,7 @@ where
     }
 
     fn round_execute(&mut self) -> Result<(), GrevmError<DB::Error>> {
-        self.partitioned_txs.clear();
+        self.partition_executors.clear();
         for partition_id in 0..self.num_partitions {
             let mut executor = PartitionExecutor::new(
                 self.spec_id.clone(),
@@ -260,7 +260,7 @@ where
 
                     for (index, rs) in executor.read_set.iter().enumerate() {
                         let txid = executor.assigned_txs[index];
-                        let mut conflict = executor.execute_results[txid].is_err();
+                        let mut conflict = executor.execute_results[index].is_err();
                         if conflict {
                             // Transactions that fail in partition executor are in conflict state
                             executor.conflict_txs.push(txid);
@@ -346,12 +346,9 @@ where
             }
         }
 
-        if self.num_finality_txs == self.txs.len() {
-            return Ok(());
-        }
-
         self.pre_unconfirmed_txs = unconfirmed_txs.split_off(&self.num_finality_txs);
         // Now `unconfirmed_txs` only contains the txs that are finality in this round
+        let finality_txs = unconfirmed_txs;
 
         // update and pruning tx dependencies
         self.update_and_pruning_dependency();
@@ -372,7 +369,7 @@ where
         Self::merge_not_modified_state(&mut database.cache, partition_state);
 
         let mut rewards: u128 = 0;
-        for ctx in unconfirmed_txs.into_values() {
+        for ctx in finality_txs.into_values() {
             rewards += ctx.execute_state.rewards;
             self.results.push(ctx.execute_state.result);
             database.commit_transition(ctx.execute_state.transition);
@@ -436,7 +433,12 @@ where
     }
 
     /// Note: The tx_type of receipt in the output is unknown, should be set by the caller.
-    pub fn parallel_execute(mut self) -> Result<ExecuteOutput, GrevmError<DB::Error>> {
+    fn evm_execute(
+        mut self,
+        force_sequential: Option<bool>,
+    ) -> Result<ExecuteOutput, GrevmError<DB::Error>> {
+        let force_parallel = !force_sequential.unwrap_or(true); // adaptive false
+        let force_sequential = force_sequential.unwrap_or(false); // adaptive false
         self.results.reserve(self.txs.len());
 
         let build_execute_output = |mut this: Self| {
@@ -450,20 +452,22 @@ where
             }
         };
 
-        if self.txs.len() < self.num_partitions {
+        if self.txs.len() < self.num_partitions && !force_parallel {
             self.execute_remaining_sequential()?;
             return Ok(build_execute_output(self));
         }
 
-        for i in 0..MAX_NUM_ROUND {
-            if self.num_finality_txs < self.txs.len() {
-                self.partition_transactions();
-                if self.num_partitions == 1 {
+        if !force_sequential {
+            for i in 0..MAX_NUM_ROUND {
+                if self.num_finality_txs < self.txs.len() {
+                    self.partition_transactions();
+                    if self.num_partitions == 1 {
+                        break;
+                    }
+                    self.round_execute()?;
+                } else {
                     break;
                 }
-                self.round_execute()?;
-            } else {
-                break;
             }
         }
         if self.num_finality_txs < self.txs.len() {
@@ -471,5 +475,17 @@ where
         }
 
         Ok(build_execute_output(self))
+    }
+
+    pub fn adaptive_execute(mut self) -> Result<ExecuteOutput, GrevmError<DB::Error>> {
+        self.evm_execute(None)
+    }
+
+    pub fn parallel_execute(mut self) -> Result<ExecuteOutput, GrevmError<DB::Error>> {
+        self.evm_execute(Some(false))
+    }
+
+    pub fn sequential_execute(mut self) -> Result<ExecuteOutput, GrevmError<DB::Error>> {
+        self.evm_execute(Some(true))
     }
 }
