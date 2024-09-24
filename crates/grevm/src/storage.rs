@@ -51,41 +51,7 @@ impl<DB> SchedulerDB<DB> {
 
     /// Commit transitions to the cache state and transition state after one round of execution.
     pub(crate) fn commit_transition(&mut self, transitions: Vec<(Address, TransitionAccount)>) {
-        for (address, account) in &transitions {
-            let new_storage = account.storage.iter().map(|(k, s)| (*k, s.present_value));
-            if let Some(entry) = self.cache.accounts.get_mut(address) {
-                if let Some(new_info) = &account.info {
-                    assert!(!account.storage_was_destroyed);
-                    if let Some(read_account) = entry.account.as_mut() {
-                        // account is loaded
-                        read_account.info = new_info.clone();
-                        read_account.storage.extend(new_storage);
-                    } else {
-                        // account is loaded not existing
-                        entry.account = Some(PlainAccount {
-                            info: new_info.clone(),
-                            storage: new_storage.collect(),
-                        });
-                    }
-                } else {
-                    assert!(account.storage_was_destroyed);
-                    entry.account = None;
-                }
-                entry.status = account.status;
-            } else {
-                self.cache.accounts.insert(
-                    *address,
-                    CacheAccount {
-                        account: account.info.as_ref().map(|info| PlainAccount {
-                            info: info.clone(),
-                            storage: new_storage.collect(),
-                        }),
-                        status: account.status,
-                    },
-                );
-            }
-        }
-
+        apply_transition_to_cache(&mut self.cache, &transitions);
         self.apply_transition(transitions);
     }
 
@@ -117,9 +83,19 @@ impl<DB> SchedulerDB<DB>
 where
     DB: DatabaseRef,
 {
+    fn load_cache_account(&mut self, address: Address) -> Result<&mut CacheAccount, DB::Error> {
+        match self.cache.accounts.entry(address) {
+            hash_map::Entry::Vacant(entry) => {
+                let info = self.database.basic_ref(address)?;
+                Ok(entry.insert(into_cache_account(info)))
+            }
+            hash_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
+        }
+    }
+
     /// rewards are distributed to the miner, ommers, and the DAO.
     /// TODO(gaoxin): Full block reward to block.beneficiary
-    pub fn increment_balances(
+    pub(crate) fn increment_balances(
         &mut self,
         balances: impl IntoIterator<Item = (Address, u128)>,
     ) -> Result<(), DB::Error> {
@@ -129,11 +105,8 @@ where
             if balance == 0 {
                 continue;
             }
-            let cache_account = self
-                .cache
-                .accounts
-                .get_mut(&address)
-                .expect("All accounts should be present inside cache");
+
+            let cache_account = self.load_cache_account(address)?;
             transitions.push((
                 address,
                 cache_account.increment_balance(balance).expect("Balance is not zero"),
@@ -191,6 +164,46 @@ fn load_storage<DB: DatabaseRef>(
     }
 }
 
+fn apply_transition_to_cache(
+    cache: &mut CacheState,
+    transitions: &Vec<(Address, TransitionAccount)>,
+) {
+    for (address, account) in transitions {
+        let new_storage = account.storage.iter().map(|(k, s)| (*k, s.present_value));
+        if let Some(entry) = cache.accounts.get_mut(address) {
+            if let Some(new_info) = &account.info {
+                assert!(!account.storage_was_destroyed);
+                if let Some(read_account) = entry.account.as_mut() {
+                    // account is loaded
+                    read_account.info = new_info.clone();
+                    read_account.storage.extend(new_storage);
+                } else {
+                    // account is loaded not existing
+                    entry.account = Some(PlainAccount {
+                        info: new_info.clone(),
+                        storage: new_storage.collect(),
+                    });
+                }
+            } else {
+                assert!(account.storage_was_destroyed);
+                entry.account = None;
+            }
+            entry.status = account.status;
+        } else {
+            cache.accounts.insert(
+                *address,
+                CacheAccount {
+                    account: account.info.as_ref().map(|info| PlainAccount {
+                        info: info.clone(),
+                        storage: new_storage.collect(),
+                    }),
+                    status: account.status,
+                },
+            );
+        }
+    }
+}
+
 /// Fall back to sequential execute
 impl<DB> Database for SchedulerDB<DB>
 where
@@ -199,13 +212,7 @@ where
     type Error = DB::Error;
 
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        match self.cache.accounts.entry(address) {
-            hash_map::Entry::Vacant(entry) => {
-                let info = self.database.basic_ref(address)?;
-                Ok(entry.insert(into_cache_account(info)).account_info())
-            }
-            hash_map::Entry::Occupied(entry) => Ok(entry.get().account_info()),
-        }
+        self.load_cache_account(address).map(|account| account.account_info())
     }
 
     fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
@@ -356,6 +363,13 @@ impl<DB> PartitionDB<DB> {
         changes: EvmState,
     ) -> Vec<(Address, TransitionAccount)> {
         self.cache.apply_evm_state(changes)
+    }
+
+    pub(crate) fn temporary_commit_transition(
+        &mut self,
+        transitions: &Vec<(Address, TransitionAccount)>,
+    ) {
+        apply_transition_to_cache(&mut self.cache, transitions);
     }
 }
 

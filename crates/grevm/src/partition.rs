@@ -170,7 +170,7 @@ where
                     if read_set.is_disjoint(&update_write_set) {
                         self.read_set.push(read_set);
                         self.write_set.push(write_set);
-                        // TODO(gravity_nekomoto): should temporary_commit the state
+                        evm.db_mut().temporary_commit_transition(&execute_state.transition);
                         self.execute_results.push(Ok(execute_state));
                         should_rerun = false;
                     }
