@@ -323,6 +323,9 @@ impl<DB> PartitionDB<DB> {
                 continue;
             }
 
+            // TODO(gaoxin): why the receiver is always Loaded
+            // the receiver doesn't get the transfer,
+            // but the sender's balance has deducted the transfer amount
             if account.is_touched() {
                 let has_code = !account.info.is_empty_code_hash();
                 // is newly created contract

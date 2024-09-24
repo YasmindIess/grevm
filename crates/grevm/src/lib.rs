@@ -17,6 +17,7 @@ lazy_static! {
 
 lazy_static! {
     static ref GREVM_RUNTIME: Runtime = Builder::new_multi_thread()
+        // .worker_threads(1) // for debug
         .worker_threads(std::thread::available_parallelism().map(|n| n.get() * 2).unwrap_or(8))
         .thread_name("grevm-tokio-runtime")
         .enable_all()

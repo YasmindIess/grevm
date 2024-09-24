@@ -89,7 +89,7 @@ where
     pub execute_results: Vec<GrevmResult<DB::Error>>,
 
     pub conflict_txs: Vec<TxId>,
-    pub unconfirmed_txs: Vec<TxId>,
+    pub unconfirmed_txs: Vec<(TxId, usize)>, // TxId and index
     pub tx_dependency: Vec<BTreeSet<TxId>>,
 
     pub pre_round_ctx: Option<PreRoundContext>,

@@ -154,6 +154,10 @@ where
     // Preload data when initializing dependencies
     async fn preload(&mut self, stop: &AtomicBool) {}
 
+    pub fn clean_dependency(&mut self) {
+        self.tx_dependencies.clean_dependency();
+    }
+
     fn generate_partition_pre_context(
         &mut self,
         partition_id: PartitionId,
@@ -283,7 +287,7 @@ where
                         }
                         executor.tx_dependency.push(updated_dependencies);
                         if !conflict {
-                            executor.unconfirmed_txs.push(txid);
+                            executor.unconfirmed_txs.push((txid, index));
                         }
                     }
                     assert_eq!(
@@ -303,8 +307,8 @@ where
                     return Err(GrevmError::EvmError(err.clone()));
                 }
             }
-            for txid in executor.unconfirmed_txs.iter() {
-                let index = executor.assigned_txs.index(txid);
+            for (txid, index) in executor.unconfirmed_txs.iter() {
+                let index = *index;
                 match &executor.execute_results[index] {
                     Ok(state) => {
                         unconfirmed_txs.insert(
@@ -461,7 +465,7 @@ where
             for i in 0..MAX_NUM_ROUND {
                 if self.num_finality_txs < self.txs.len() {
                     self.partition_transactions();
-                    if self.num_partitions == 1 {
+                    if self.num_partitions == 1 && !force_parallel {
                         break;
                     }
                     self.round_execute()?;

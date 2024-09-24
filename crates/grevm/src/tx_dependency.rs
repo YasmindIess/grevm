@@ -30,9 +30,12 @@ impl TxDependency {
         }
     }
 
-    pub fn generate_tx_dependency(
-        parallel_execution_hints: &ParallelExecutionHints,
-    ) -> Vec<Vec<TxId>> {
+    pub fn clean_dependency(&mut self) {
+        let len = self.tx_dependency.len();
+        self.tx_dependency = vec![vec![]; len];
+    }
+
+    fn generate_tx_dependency(parallel_execution_hints: &ParallelExecutionHints) -> Vec<Vec<TxId>> {
         let mut tx_dependency: Vec<Vec<TxId>> = vec![];
         let mut write_set: HashMap<Address, BTreeSet<TxId>> = HashMap::new();
         for (txid, rw_set) in parallel_execution_hints.txs_hint.iter().enumerate() {
@@ -56,30 +59,46 @@ impl TxDependency {
         let mut num_group = 0;
         let mut weighted_group: BTreeMap<usize, Vec<Vec<TxId>>> = BTreeMap::new();
         let tx_weight = self.tx_weight.clone().unwrap_or_else(|| vec![1; self.tx_dependency.len()]);
-        let mut grouped = vec![false; self.tx_dependency.len()];
+        let mut inqueue = vec![false; self.tx_dependency.len()];
         let num_finality_txs = self.num_finality_txs;
         let mut txid = self.num_finality_txs + self.tx_dependency.len() - 1;
+
+        // the revert of self.tx_dependency
+        // if txi <- txj, then tx_dependency[txi - num_finality_txs].push(txj)
+        let mut revert_dependency: Vec<Vec<TxId>> = vec![vec![]; self.tx_dependency.len()];
+        for (index, deps) in self.tx_dependency.iter().enumerate() {
+            let txj = index + num_finality_txs;
+            for txi in deps {
+                revert_dependency[*txi - num_finality_txs].push(txj);
+            }
+        }
         // Because transactions only rely on transactions with lower ID,
         // we can search from the transaction with the highest ID from back to front.
         // Despite having three layers of loops, the time complexity is only o(num_txs)
         while txid >= num_finality_txs {
-            if !grouped[txid - num_finality_txs] {
+            let index = txid - num_finality_txs;
+            if !inqueue[index] {
                 let mut group: Vec<TxId> = vec![];
                 let mut weight: usize = 0;
                 // Traverse the breadth from back to front
                 let mut breadth_queue = VecDeque::new();
-                breadth_queue.push_back(txid);
-                while let Some(top) = breadth_queue.pop_front() {
-                    if !grouped[txid - num_finality_txs] {
-                        grouped[txid - num_finality_txs] = true;
-                        for top_down in self.tx_dependency[top].iter() {
-                            if !grouped[txid - num_finality_txs] {
-                                breadth_queue.push_back(*top_down);
-                            }
+                breadth_queue.push_back(index);
+                inqueue[index] = true;
+                while let Some(top_index) = breadth_queue.pop_front() {
+                    // txj -> txi, where txj = top_index + num_finality_txs
+                    for top_down in self.tx_dependency[top_index]
+                        .iter()
+                        .chain(revert_dependency[top_index].iter())
+                    // txk -> txj, where txj = top_index + num_finality_txs
+                    {
+                        let next_index = *top_down - num_finality_txs;
+                        if !inqueue[next_index] {
+                            breadth_queue.push_back(next_index);
+                            inqueue[next_index] = true;
                         }
-                        weight += tx_weight[top - num_finality_txs];
-                        group.push(top);
                     }
+                    weight += tx_weight[index];
+                    group.push(top_index + num_finality_txs);
                 }
                 weighted_group.entry(weight).or_default().push(group);
                 num_group += 1;
