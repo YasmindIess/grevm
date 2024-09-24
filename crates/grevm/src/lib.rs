@@ -1,3 +1,5 @@
+use std::fmt::{Display, Formatter};
+
 use lazy_static::lazy_static;
 use reth_revm::TransitionAccount;
 use revm_primitives::{Address, EVMError, EVMResultGeneric, ExecutionResult, B256, U256};
@@ -58,6 +60,16 @@ pub enum GrevmError<DBError> {
     UnreachableError(String),
 }
 
+impl<DBError: Display> Display for GrevmError<DBError> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GrevmError::EvmError(e) => write!(f, "EVM Error: {}", e),
+            GrevmError::ExecutionError(e) => write!(f, "Execution Error: {}", e),
+            GrevmError::UnreachableError(e) => write!(f, "Unreachable Error: {}", e),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ResultAndTransition {
     /// Status of execution
@@ -69,3 +81,5 @@ pub struct ResultAndTransition {
 }
 
 pub type GrevmResult<DBError> = EVMResultGeneric<ResultAndTransition, DBError>;
+
+pub use scheduler::*;

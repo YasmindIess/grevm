@@ -1,5 +1,6 @@
 use std::collections::{btree_map, hash_map, BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::thread;
 
 use reth_revm::db::states::bundle_state::BundleRetention;
 use reth_revm::db::states::CacheAccount;
@@ -358,8 +359,7 @@ impl<DB> PartitionDB<DB> {
 /// Used to build evm, and hook the read operations
 impl<DB> Database for PartitionDB<DB>
 where
-    DB: DatabaseRef + Send + Sync,
-    DB::Error: Send + Sync,
+    DB: DatabaseRef,
 {
     type Error = DB::Error;
 

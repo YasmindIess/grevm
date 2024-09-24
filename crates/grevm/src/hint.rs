@@ -53,7 +53,7 @@ impl ParallelExecutionHints {
     pub(crate) fn new(txs: &Vec<TxEnv>) -> Self {
         let mut hints: Vec<TxRWSet> = Vec::with_capacity(txs.len());
 
-        for (index, tx_env) in txs.iter().enumerate() {
+        for tx_env in txs {
             let rw_set = TxRWSet::default();
             // Causing transactions that call the same contract to inevitably
             // conflict with each other. Is this behavior reasonable?

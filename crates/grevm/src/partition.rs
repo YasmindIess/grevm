@@ -48,7 +48,6 @@ impl<E: Ord> OrderedVectorExt<E> for Vec<E> {
     }
 }
 
-#[derive(Clone)]
 pub(crate) struct PreUnconfirmedContext {
     pub read_set: HashSet<LocationAndType>,
     pub write_set: HashSet<LocationAndType>,
@@ -98,8 +97,7 @@ where
 
 impl<DB> PartitionExecutor<DB>
 where
-    DB: DatabaseRef + Send + Sync + 'static,
-    DB::Error: Send + Sync,
+    DB: DatabaseRef,
 {
     pub(crate) fn new(
         spec_id: SpecId,

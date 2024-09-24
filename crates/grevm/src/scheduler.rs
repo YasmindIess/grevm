@@ -1,11 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fmt::Display;
 use std::ops::DerefMut;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
+use reth_revm::db::states::bundle_state::BundleRetention;
+use reth_revm::db::BundleState;
 use revm_primitives::db::DatabaseRef;
-use revm_primitives::{Address, EVMError, Env, SpecId, TxEnv};
+use revm_primitives::Bytecode;
+use revm_primitives::{
+    AccountInfo, Address, EVMError, Env, ExecutionResult, SpecId, TxEnv, B256, U256,
+};
 
 use reth_revm::{CacheState, EvmBuilder};
 
@@ -18,6 +22,13 @@ use crate::tx_dependency::TxDependency;
 use crate::{
     GrevmError, LocationAndType, PartitionId, TxId, CPU_CORES, GREVM_RUNTIME, MAX_NUM_ROUND,
 };
+
+pub struct ExecuteOutput {
+    /// The changed state of the block after execution.
+    pub state: BundleState,
+    /// All the results of the transactions in the block.
+    pub results: Vec<ExecutionResult>,
+}
 
 pub struct GrevmScheduler<DB>
 where
@@ -47,6 +58,55 @@ where
 
     // update after each round
     pre_unconfirmed_txs: BTreeMap<TxId, PreUnconfirmedContext>,
+
+    results: Vec<ExecutionResult>,
+}
+
+pub struct DatabaseWrapper<Error>(Arc<dyn DatabaseRef<Error = Error> + Send + Sync + 'static>);
+
+impl<Error> DatabaseRef for DatabaseWrapper<Error> {
+    type Error = Error;
+
+    fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+        self.0.basic_ref(address)
+    }
+
+    fn code_by_hash_ref(&self, code_hash: B256) -> Result<Bytecode, Self::Error> {
+        self.0.code_by_hash_ref(code_hash)
+    }
+
+    fn storage_ref(&self, address: Address, index: U256) -> Result<U256, Self::Error> {
+        self.0.storage_ref(address, index)
+    }
+
+    fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
+        self.0.block_hash_ref(number)
+    }
+}
+
+/// Creates a new GrevmScheduler instance.
+pub fn new_grevm_scheduler<DB>(
+    spec_id: SpecId,
+    env: Env,
+    db: DB,
+    txs: Vec<TxEnv>,
+) -> GrevmScheduler<DatabaseWrapper<DB::Error>>
+where
+    DB: DatabaseRef + Send + Sync,
+    DB::Error: Clone + Send + Sync + 'static,
+{
+    // FIXME(gravity_nekomoto): use unsafe to bypass the 'static constraint of `tokio::spawn`.
+    // We can be confident that the spawned task will be joined before the members in `db` are
+    // dropped.
+    let db = unsafe {
+        let boxed: Arc<dyn DatabaseRef<Error = DB::Error>> = Arc::new(db);
+        std::mem::transmute::<
+            Arc<dyn DatabaseRef<Error = DB::Error>>,
+            Arc<dyn DatabaseRef<Error = DB::Error> + Send + Sync + 'static>,
+        >(boxed)
+    };
+    let db: DatabaseWrapper<DB::Error> = DatabaseWrapper(db);
+    GrevmScheduler::new(spec_id, env, db, txs)
 }
 
 impl<DB> GrevmScheduler<DB>
@@ -73,6 +133,7 @@ where
             partition_executors: vec![],
             num_finality_txs: 0,
             pre_unconfirmed_txs: BTreeMap::new(),
+            results: Vec::new(),
         }
     }
 
@@ -135,10 +196,7 @@ where
             }
             futures::future::join_all(tasks).await;
         });
-        // validate transactions
-        // TODO(gravity_nekomoto): Merge changed state of finality txs
-        // MUST drop the `PartitionExecutor::scheduler_db` before get mut
-        // let db_mut = Arc::get_mut(&mut self.database).expect(...);
+
         self.validate_transactions()
     }
 
@@ -254,6 +312,7 @@ where
                             PreUnconfirmedContext {
                                 read_set: executor.read_set[index].clone(),
                                 write_set: executor.write_set[index].clone(),
+                                // FIXME(gravity): clone is not necessary
                                 execute_state: state.clone(),
                             },
                         );
@@ -287,7 +346,9 @@ where
             }
         }
 
-        // TODO(gravity): early stop if num_finality_txs == txs.len()
+        if self.num_finality_txs == self.txs.len() {
+            return Ok(());
+        }
 
         self.pre_unconfirmed_txs = unconfirmed_txs.split_off(&self.num_finality_txs);
         // Now `unconfirmed_txs` only contains the txs that are finality in this round
@@ -306,14 +367,14 @@ where
 
         // MUST drop the `PartitionExecutor::scheduler_db` before get mut
         self.partition_executors.clear();
-        let database = Arc::get_mut(&mut self.database)
-            .expect("database is shared by other threads/struct here, indicating bugs");
+        let database = Arc::get_mut(&mut self.database).unwrap();
 
         Self::merge_not_modified_state(&mut database.cache, partition_state);
 
         let mut rewards: u128 = 0;
         for ctx in unconfirmed_txs.into_values() {
             rewards += ctx.execute_state.rewards;
+            self.results.push(ctx.execute_state.result);
             database.commit_transition(ctx.execute_state.transition);
         }
         // Each transaction updates three accounts: from, to, and coinbase.
@@ -349,9 +410,9 @@ where
     }
 
     fn execute_remaining_sequential(&mut self) -> Result<(), GrevmError<DB::Error>> {
-        // execute remaining txs
-        let database = Arc::get_mut(&mut self.database)
-            .expect("database is shared by other threads/struct here, indicating bugs");
+        // MUST drop the `PartitionExecutor::scheduler_db` before get mut
+        self.partition_executors.clear();
+        let database = Arc::get_mut(&mut self.database).unwrap();
         let mut evm = EvmBuilder::default()
             .with_db(database)
             .with_spec_id(self.spec_id)
@@ -365,7 +426,8 @@ where
             }
             match evm.transact() {
                 Ok(result_and_state) => {
-                    evm.db_mut().commit(result_and_state.state.clone());
+                    evm.db_mut().commit(result_and_state.state);
+                    self.results.push(result_and_state.result);
                 }
                 Err(err) => return Err(GrevmError::EvmError(err)),
             }
@@ -373,9 +435,24 @@ where
         Ok(())
     }
 
-    fn parallel_execute(&mut self) -> Result<(), GrevmError<DB::Error>> {
+    /// Note: The tx_type of receipt in the output is unknown, should be set by the caller.
+    pub fn parallel_execute(mut self) -> Result<ExecuteOutput, GrevmError<DB::Error>> {
+        self.results.reserve(self.txs.len());
+
+        let build_execute_output = |mut this: Self| {
+            // MUST drop the `PartitionExecutor::scheduler_db` before get mut
+            this.partition_executors.clear();
+            let database = Arc::get_mut(&mut this.database).unwrap();
+            database.merge_transitions(BundleRetention::Reverts);
+            ExecuteOutput {
+                state: std::mem::take(&mut database.bundle_state),
+                results: std::mem::take(&mut this.results),
+            }
+        };
+
         if self.txs.len() < self.num_partitions {
-            return self.execute_remaining_sequential();
+            self.execute_remaining_sequential()?;
+            return Ok(build_execute_output(self));
         }
 
         for i in 0..MAX_NUM_ROUND {
@@ -392,6 +469,7 @@ where
         if self.num_finality_txs < self.txs.len() {
             self.execute_remaining_sequential()?;
         }
-        Ok(())
+
+        Ok(build_execute_output(self))
     }
 }
