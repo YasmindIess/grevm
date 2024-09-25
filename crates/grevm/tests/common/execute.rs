@@ -29,8 +29,8 @@ fn compare_bundle_state(left: BundleState, right: BundleState) {
 
 pub fn mock_eoa_account(idx: usize) -> (Address, Account) {
     let address = Address::from(U160::from(idx));
-    // half of max balance, 0 for miner(Address::ZERO)
-    let balance = if idx == 0 { U256::from(0) } else { U256::MAX.div_ceil(U256::from(2)) };
+    // 0 for miner(Address::ZERO)
+    let balance = if idx == 0 { U256::from(0) } else { U256::from(500_000_000) };
     let account = Account {
         info: AccountInfo { balance, nonce: 1, code_hash: KECCAK_EMPTY, code: None },
         storage: Default::default(),

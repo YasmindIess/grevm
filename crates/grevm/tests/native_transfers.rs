@@ -84,7 +84,7 @@ fn native_with_all_related() {
             TxEnv {
                 caller: from,
                 transact_to: TransactTo::Call(to),
-                value: U256::from(100),
+                value: U256::from(1000),
                 gas_limit: common::TRANSFER_GAS_LIMIT,
                 gas_price: U256::from(1),
                 nonce: None,
