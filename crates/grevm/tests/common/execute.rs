@@ -1,7 +1,8 @@
 use reth_chainspec::NamedChain;
-use reth_grevm::GrevmScheduler;
-use reth_revm::db::states::StorageSlot;
+use reth_grevm::{ExecuteOutput, GrevmScheduler};
+use reth_revm::db::states::bundle_state::BundleRetention;
 use reth_revm::db::{BundleAccount, BundleState};
+use reth_revm::{DatabaseCommit, EvmBuilder, StateBuilder};
 use revm_primitives::alloy_primitives::{U160, U256};
 use revm_primitives::db::DatabaseRef;
 use revm_primitives::{
@@ -11,20 +12,17 @@ use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-fn compare_bundle_state(left: BundleState, right: BundleState) {
-    // only compare state
-    let left: BTreeMap<Address, BundleAccount> = left.state.into_iter().collect();
-    let right: BTreeMap<Address, BundleAccount> = right.state.into_iter().collect();
-    for (b1, b2) in left.into_iter().zip(right.into_iter()) {
-        assert_eq!(b1.0, b2.0);
-        let BundleAccount { info, original_info, storage, status } = b1.1;
-        assert_eq!(info, b2.1.info);
-        assert_eq!(original_info, b2.1.original_info);
-        assert_eq!(status, b2.1.status);
-        let storage1: BTreeMap<U256, StorageSlot> = storage.into_iter().collect();
-        let storage2: BTreeMap<U256, StorageSlot> = b2.1.storage.into_iter().collect();
-        assert_eq!(storage1, storage2);
+fn compare_bundle_state(left: &BundleState, right: &BundleState) {
+    let left_state: BTreeMap<&Address, &BundleAccount> = left.state.iter().collect();
+    let right_state: BTreeMap<&Address, &BundleAccount> = right.state.iter().collect();
+    for ((addr1, account1), (addr2, account2)) in
+        left_state.into_iter().zip(right_state.into_iter())
+    {
+        assert_eq!(addr1, addr2);
+        assert_eq!(account1, account2, "Address: {:?}", addr1);
     }
+
+    assert_eq!(left.contracts, right.contracts);
 }
 
 pub fn mock_eoa_account(idx: usize) -> (Address, Account) {
@@ -49,7 +47,7 @@ where
     // take `Address::ZERO` as the beneficiary account.
     env.block.coinbase = Address::ZERO;
     let db = Arc::new(db);
-    let mut sequential = GrevmScheduler::new(SpecId::LATEST, env.clone(), db.clone(), txs.clone());
+    let sequential = GrevmScheduler::new(SpecId::LATEST, env.clone(), db.clone(), txs.clone());
     let sequential_result = sequential.sequential_execute();
     let mut parallel = GrevmScheduler::new(SpecId::LATEST, env.clone(), db.clone(), txs.clone());
     if !with_hints {
@@ -57,5 +55,51 @@ where
     }
     let parallel_result = parallel.parallel_execute();
 
-    compare_bundle_state(sequential_result.unwrap().state, parallel_result.unwrap().state);
+    let reth_result = execute_revm_sequential(db.clone(), SpecId::LATEST, env.clone(), txs.clone());
+
+    assert_eq!(reth_result.as_ref().unwrap().results, sequential_result.as_ref().unwrap().results);
+
+    compare_bundle_state(
+        &reth_result.as_ref().unwrap().state,
+        &sequential_result.as_ref().unwrap().state,
+    );
+    compare_bundle_state(
+        &reth_result.as_ref().unwrap().state,
+        &parallel_result.as_ref().unwrap().state,
+    );
+}
+
+/// Simulate the sequential execution of transactions in reth
+pub(crate) fn execute_revm_sequential<DB>(
+    db: DB,
+    spec_id: SpecId,
+    env: Env,
+    txs: Vec<TxEnv>,
+) -> Option<ExecuteOutput>
+where
+    DB: DatabaseRef,
+    DB::Error: Debug,
+{
+    let db = StateBuilder::new().with_database_ref(db).build();
+    let mut evm =
+        EvmBuilder::default().with_db(db).with_spec_id(spec_id).with_env(Box::new(env)).build();
+
+    let mut results = Vec::with_capacity(txs.len());
+    for tx in txs {
+        *evm.tx_mut() = tx;
+        match evm.transact() {
+            Ok(result_and_state) => {
+                evm.db_mut().commit(result_and_state.state);
+                results.push(result_and_state.result);
+            }
+            Err(err) => {
+                println!("Error: {:?}", err);
+                return None;
+            }
+        }
+    }
+
+    evm.db_mut().merge_transitions(BundleRetention::Reverts);
+
+    Some(ExecuteOutput { state: evm.db_mut().take_bundle(), results })
 }
