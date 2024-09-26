@@ -210,8 +210,13 @@ where
 
                         // update read set
                         self.read_set.push(evm.db_mut().take_read_set());
-                        // update write set with empty set
-                        self.write_set.push(HashSet::new());
+                        // update write set with the caller and transact_to
+                        let mut write_set = HashSet::new();
+                        write_set.insert(LocationAndType::Basic(evm.tx().caller));
+                        if let TxKind::Call(to) = evm.tx().transact_to {
+                            write_set.insert(LocationAndType::Basic(to));
+                        }
+                        self.write_set.push(write_set);
                         self.execute_results.push(Err(err));
                     }
                 }

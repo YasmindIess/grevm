@@ -316,7 +316,10 @@ impl<DB> PartitionDB<DB> {
                         Some(miner) => {
                             rewards = Some((account.info.balance - miner.info.balance).to());
                         }
-                        None => panic!("Miner account not exist"),
+                        // LoadedNotExisting
+                        None => {
+                            rewards = Some(account.info.balance.to());
+                        },
                     },
                     None => panic!("Miner should be cached"),
                 }
