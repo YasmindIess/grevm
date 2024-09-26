@@ -1,13 +1,14 @@
 pub mod common;
 
-use common::InMemoryDB;
-use revm_primitives::{alloy_primitives::U160, Account, Address, TransactTo, TxEnv, U256};
+use common::storage::InMemoryDB;
+use reth_revm::db::PlainAccount;
+use revm_primitives::{alloy_primitives::U160, Address, TransactTo, TxEnv, U256};
 use std::collections::HashMap;
 
 #[test]
 fn native_transfers_independent() {
     let block_size = 10_000; // number of transactions
-    let accounts: HashMap<Address, Account> =
+    let accounts: HashMap<Address, PlainAccount> =
         (0..=block_size).map(common::mock_eoa_account).collect();
     let db = InMemoryDB::new(accounts, Default::default(), Default::default());
     // `Address::ZERO` is the minner address in compare_evm_execute
@@ -32,7 +33,7 @@ fn native_transfers_independent() {
 #[test]
 fn native_with_same_sender() {
     let block_size = 100;
-    let accounts: HashMap<Address, Account> =
+    let accounts: HashMap<Address, PlainAccount> =
         (0..=block_size + 1).map(common::mock_eoa_account).collect();
     let db = InMemoryDB::new(accounts, Default::default(), Default::default());
 
@@ -72,7 +73,7 @@ fn native_with_same_sender() {
 #[test]
 fn native_with_all_related() {
     let block_size = 100;
-    let accounts: HashMap<Address, Account> =
+    let accounts: HashMap<Address, PlainAccount> =
         (0..=block_size + 1).map(common::mock_eoa_account).collect();
     let db = InMemoryDB::new(accounts, Default::default(), Default::default());
     let txs: Vec<TxEnv> = (1..=block_size)

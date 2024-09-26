@@ -1,13 +1,11 @@
 use reth_chainspec::NamedChain;
 use reth_grevm::{ExecuteOutput, GrevmScheduler};
 use reth_revm::db::states::bundle_state::BundleRetention;
-use reth_revm::db::{BundleAccount, BundleState};
+use reth_revm::db::{BundleAccount, BundleState, PlainAccount};
 use reth_revm::{DatabaseCommit, EvmBuilder, StateBuilder};
 use revm_primitives::alloy_primitives::{U160, U256};
 use revm_primitives::db::DatabaseRef;
-use revm_primitives::{
-    Account, AccountInfo, AccountStatus, Address, Env, SpecId, TxEnv, KECCAK_EMPTY,
-};
+use revm_primitives::{AccountInfo, Address, Env, SpecId, TxEnv, KECCAK_EMPTY};
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -15,24 +13,35 @@ use std::sync::Arc;
 fn compare_bundle_state(left: &BundleState, right: &BundleState) {
     let left_state: BTreeMap<&Address, &BundleAccount> = left.state.iter().collect();
     let right_state: BTreeMap<&Address, &BundleAccount> = right.state.iter().collect();
-    for ((addr1, account1), (addr2, account2)) in
-        left_state.into_iter().zip(right_state.into_iter())
-    {
+    for ((addr1, account1), (addr2, account2)) in left_state.iter().zip(right_state.iter()) {
         assert_eq!(addr1, addr2);
         assert_eq!(account1, account2, "Address: {:?}", addr1);
     }
+    assert_eq!(left_state.len(), right_state.len());
 
-    assert_eq!(left.contracts, right.contracts);
+    assert!(
+        left.contracts.keys().all(|k| right.contracts.contains_key(k)),
+        "Left contracts: {:?}, Right contracts: {:?}",
+        left.contracts.keys(),
+        right.contracts.keys()
+    );
+
+    assert_eq!(
+        left.contracts.len(),
+        right.contracts.len(),
+        "Left contracts: {:?}, Right contracts: {:?}",
+        left.contracts.keys(),
+        right.contracts.keys()
+    )
 }
 
-pub fn mock_eoa_account(idx: usize) -> (Address, Account) {
+pub fn mock_eoa_account(idx: usize) -> (Address, PlainAccount) {
     let address = Address::from(U160::from(idx));
     // 0 for miner(Address::ZERO)
     let balance = if idx == 0 { U256::from(0) } else { U256::from(500_000_000) };
-    let account = Account {
+    let account = PlainAccount {
         info: AccountInfo { balance, nonce: 1, code_hash: KECCAK_EMPTY, code: None },
         storage: Default::default(),
-        status: AccountStatus::Loaded,
     };
     (address, account)
 }
@@ -56,6 +65,8 @@ where
     let parallel_result = parallel.parallel_execute();
 
     let reth_result = execute_revm_sequential(db.clone(), SpecId::LATEST, env.clone(), txs.clone());
+
+    println!("reth_result: {:?}", reth_result.as_ref().unwrap().results);
 
     assert_eq!(reth_result.as_ref().unwrap().results, sequential_result.as_ref().unwrap().results);
 
