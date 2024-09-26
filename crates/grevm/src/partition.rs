@@ -209,13 +209,16 @@ where
                         // During verification, failed transactions are conflict state
 
                         // update read set
-                        self.read_set.push(evm.db_mut().take_read_set());
+                        let mut read_set = evm.db_mut().take_read_set();
                         // update write set with the caller and transact_to
                         let mut write_set = HashSet::new();
+                        read_set.insert(LocationAndType::Basic(evm.tx().caller));
                         write_set.insert(LocationAndType::Basic(evm.tx().caller));
                         if let TxKind::Call(to) = evm.tx().transact_to {
+                            read_set.insert(LocationAndType::Basic(to));
                             write_set.insert(LocationAndType::Basic(to));
                         }
+                        self.read_set.push(read_set);
                         self.write_set.push(write_set);
                         self.execute_results.push(Err(err));
                     }

@@ -2,6 +2,7 @@ use crate::common::MINER_ADDRESS;
 use reth_chainspec::NamedChain;
 use reth_grevm::{ExecuteOutput, GrevmScheduler};
 use reth_revm::db::states::bundle_state::BundleRetention;
+use reth_revm::db::states::StorageSlot;
 use reth_revm::db::{BundleAccount, BundleState, PlainAccount};
 use reth_revm::{DatabaseCommit, EvmBuilder, StateBuilder};
 use revm_primitives::alloy_primitives::{U160, U256};
@@ -12,28 +13,40 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 fn compare_bundle_state(left: &BundleState, right: &BundleState) {
-    let left_state: BTreeMap<&Address, &BundleAccount> = left.state.iter().collect();
-    let right_state: BTreeMap<&Address, &BundleAccount> = right.state.iter().collect();
-    for ((addr1, account1), (addr2, account2)) in left_state.iter().zip(right_state.iter()) {
-        assert_eq!(addr1, addr2);
-        assert_eq!(account1, account2, "Address: {:?}", addr1);
-    }
-    assert_eq!(left_state.len(), right_state.len());
-
+    let left = left.clone();
+    let right = right.clone();
     assert!(
         left.contracts.keys().all(|k| right.contracts.contains_key(k)),
         "Left contracts: {:?}, Right contracts: {:?}",
         left.contracts.keys(),
         right.contracts.keys()
     );
-
     assert_eq!(
         left.contracts.len(),
         right.contracts.len(),
         "Left contracts: {:?}, Right contracts: {:?}",
         left.contracts.keys(),
         right.contracts.keys()
-    )
+    );
+
+    let left_state: BTreeMap<Address, BundleAccount> = left.state.into_iter().collect();
+    let right_state: BTreeMap<Address, BundleAccount> = right.state.into_iter().collect();
+    assert_eq!(left_state.len(), right_state.len());
+
+    for ((addr1, account1), (addr2, account2)) in
+        left_state.into_iter().zip(right_state.into_iter())
+    {
+        assert_eq!(addr1, addr2);
+        let BundleAccount { info, original_info, storage, status } = account1;
+        assert_eq!(info, account2.info);
+        assert_eq!(original_info, account2.original_info);
+        assert_eq!(status, account2.status);
+        let left_storage: BTreeMap<U256, StorageSlot> = storage.into_iter().collect();
+        let right_storage: BTreeMap<U256, StorageSlot> = account2.storage.into_iter().collect();
+        for (s1, s2) in left_storage.into_iter().zip(right_storage.into_iter()) {
+            assert_eq!(s1, s2);
+        }
+    }
 }
 
 pub fn mock_eoa_account(idx: usize) -> (Address, PlainAccount) {

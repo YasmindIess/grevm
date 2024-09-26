@@ -308,6 +308,7 @@ impl<DB> PartitionDB<DB> {
                 continue;
             }
 
+            let mut miner_updated = false;
             // When fully tracking the updates to the miner’s account,
             // we should set rewards = 0
             if self.coinbase == *address && !self.miner_involved {
@@ -315,15 +316,16 @@ impl<DB> PartitionDB<DB> {
                     Some(miner) => match miner.account.as_ref() {
                         Some(miner) => {
                             rewards = Some((account.info.balance - miner.info.balance).to());
+                            miner_updated = true;
                         }
                         // LoadedNotExisting
                         None => {
                             rewards = Some(account.info.balance.to());
+                            miner_updated = true;
                         },
                     },
                     None => panic!("Miner should be cached"),
                 }
-                continue;
             }
 
             if account.is_touched() {
@@ -346,7 +348,9 @@ impl<DB> PartitionDB<DB> {
                         true
                     }
                 } {
-                    write_set.insert(LocationAndType::Basic(*address));
+                    if !miner_updated {
+                        write_set.insert(LocationAndType::Basic(*address));
+                    }
                 }
                 if new_contract_account {
                     write_set.insert(LocationAndType::Code(account.info.code_hash()));

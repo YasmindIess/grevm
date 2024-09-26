@@ -48,5 +48,5 @@ fn erc20_clusters() {
     }
 
     let db = InMemoryDB::new(final_state, final_bytecodes, Default::default());
-    common::compare_evm_execute(db, final_txs, false);
+    common::compare_evm_execute(db, final_txs, true);
 }
