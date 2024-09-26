@@ -9,12 +9,9 @@ use std::collections::HashMap;
 #[test]
 fn native_transfers_independent() {
     let block_size = 10_000; // number of transactions
-    let accounts: HashMap<Address, PlainAccount> =
-        (0..=block_size).map(common::mock_eoa_account).collect();
+    let accounts = common::mock_block_accounts(START_ADDRESS, block_size);
     let db = InMemoryDB::new(accounts, Default::default(), Default::default());
-    // `Address::ZERO` is the minner address in compare_evm_execute
-    // Skipping `Address::ZERO` as the beneficiary account.
-    let txs: Vec<TxEnv> = (1..=block_size)
+    let txs: Vec<TxEnv> = (START_ADDRESS..START_ADDRESS + block_size)
         .map(|i| {
             let address = Address::from(U160::from(i));
             TxEnv {
@@ -34,16 +31,13 @@ fn native_transfers_independent() {
 #[test]
 fn native_with_same_sender() {
     let block_size = 100;
-    let accounts: HashMap<Address, PlainAccount> =
-        (0..=block_size + 1).map(common::mock_eoa_account).collect();
+    let accounts = common::mock_block_accounts(START_ADDRESS, block_size + 1);
     let db = InMemoryDB::new(accounts, Default::default(), Default::default());
 
-    let sender_address = Address::from(U160::from(1));
-    let receiver_address = Address::from(U160::from(block_size + 1));
+    let sender_address = Address::from(U160::from(START_ADDRESS));
+    let receiver_address = Address::from(U160::from(START_ADDRESS + 1));
     let mut sender_nonce = 0;
-    // `Address::ZERO` is the minner address in compare_evm_execute
-    // Skipping `Address::ZERO` as the beneficiary account.
-    let txs: Vec<TxEnv> = (1..=block_size)
+    let txs: Vec<TxEnv> = (START_ADDRESS..START_ADDRESS + block_size)
         .map(|i| {
             let (address, to, nonce) = if i % 4 != 1 {
                 (Address::from(U160::from(i)), Address::from(U160::from(i)), 1)
@@ -74,10 +68,7 @@ fn native_with_same_sender() {
 #[test]
 fn native_with_all_related() {
     let block_size = 100;
-    let mut accounts: HashMap<Address, PlainAccount> =
-        (START_ADDRESS..=START_ADDRESS + block_size).map(common::mock_eoa_account).collect();
-    // // 0 for miner(Address::ZERO)
-    accounts.insert(Address::ZERO, common::mock_eoa_account(0).1);
+    let accounts = common::mock_block_accounts(START_ADDRESS, block_size);
     let db = InMemoryDB::new(accounts, Default::default(), Default::default());
     let txs: Vec<TxEnv> = (START_ADDRESS..START_ADDRESS + block_size)
         .map(|i| {
@@ -96,5 +87,57 @@ fn native_with_all_related() {
             }
         })
         .collect();
+    common::compare_evm_execute(db, txs, false);
+}
+
+#[test]
+fn native_with_unconfirmed_reuse() {
+    let block_size = 100;
+    let accounts = common::mock_block_accounts(START_ADDRESS, block_size);
+    let db = InMemoryDB::new(accounts, Default::default(), Default::default());
+    let txs: Vec<TxEnv> = (START_ADDRESS..START_ADDRESS + block_size)
+        .map(|i| {
+            let (from, to) = if i % 10 == 0 {
+                (Address::from(U160::from(i)), Address::from(U160::from(i + 1)))
+            } else {
+                (Address::from(U160::from(i)), Address::from(U160::from(i)))
+            };
+            // tx0 tx10, tx20, tx30 ... tx90 will produce dependency for the next tx,
+            // so tx1, tx11, tx21, tx31, tx91 maybe redo on next round.
+            // However, tx2 ~ tx9, tx12 ~ tx19 can reuse the result from the pre-round context.
+            TxEnv {
+                caller: from,
+                transact_to: TransactTo::Call(to),
+                value: U256::from(100),
+                gas_limit: common::TRANSFER_GAS_LIMIT,
+                gas_price: U256::from(1),
+                nonce: None,
+                ..TxEnv::default()
+            }
+        })
+        .collect();
+    common::compare_evm_execute(db, txs, false);
+}
+
+#[test]
+fn native_zero_or_one_tx() {
+    let accounts = common::mock_block_accounts(START_ADDRESS, 0);
+    let db = InMemoryDB::new(accounts, Default::default(), Default::default());
+    let txs: Vec<TxEnv> = vec![];
+    // empty block
+    common::compare_evm_execute(db, txs, false);
+
+    // one tx
+    let txs = vec![TxEnv {
+        caller: Address::from(U160::from(START_ADDRESS)),
+        transact_to: TransactTo::Call(Address::from(U160::from(START_ADDRESS))),
+        value: U256::from(1000),
+        gas_limit: common::TRANSFER_GAS_LIMIT,
+        gas_price: U256::from(1),
+        nonce: None,
+        ..TxEnv::default()
+    }];
+    let accounts = common::mock_block_accounts(START_ADDRESS, 1);
+    let db = InMemoryDB::new(accounts, Default::default(), Default::default());
     common::compare_evm_execute(db, txs, false);
 }

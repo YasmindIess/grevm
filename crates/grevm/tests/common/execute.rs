@@ -1,3 +1,4 @@
+use crate::common::MINER_ADDRESS;
 use reth_chainspec::NamedChain;
 use reth_grevm::{ExecuteOutput, GrevmScheduler};
 use reth_revm::db::states::bundle_state::BundleRetention;
@@ -6,7 +7,7 @@ use reth_revm::{DatabaseCommit, EvmBuilder, StateBuilder};
 use revm_primitives::alloy_primitives::{U160, U256};
 use revm_primitives::db::DatabaseRef;
 use revm_primitives::{AccountInfo, Address, Env, SpecId, TxEnv, KECCAK_EMPTY};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -37,13 +38,19 @@ fn compare_bundle_state(left: &BundleState, right: &BundleState) {
 
 pub fn mock_eoa_account(idx: usize) -> (Address, PlainAccount) {
     let address = Address::from(U160::from(idx));
-    // 0 for miner(Address::ZERO)
-    let balance = if idx == 0 { U256::from(0) } else { U256::from(500_000_000) };
+    let balance = if idx == MINER_ADDRESS { U256::from(0) } else { U256::from(500_000_000) };
     let account = PlainAccount {
         info: AccountInfo { balance, nonce: 1, code_hash: KECCAK_EMPTY, code: None },
         storage: Default::default(),
     };
     (address, account)
+}
+
+pub fn mock_block_accounts(from: usize, size: usize) -> HashMap<Address, PlainAccount> {
+    let mut accounts: HashMap<Address, PlainAccount> =
+        (from..(from + size)).map(mock_eoa_account).collect();
+    accounts.insert(Address::from(U160::from(MINER_ADDRESS)), mock_eoa_account(MINER_ADDRESS).1);
+    accounts
 }
 
 pub fn compare_evm_execute<DB>(db: DB, txs: Vec<TxEnv>, with_hints: bool)
@@ -53,8 +60,7 @@ where
 {
     let mut env = Env::default();
     env.cfg.chain_id = NamedChain::Mainnet.into();
-    // take `Address::ZERO` as the beneficiary account.
-    env.block.coinbase = Address::ZERO;
+    env.block.coinbase = Address::from(U160::from(MINER_ADDRESS));
     let db = Arc::new(db);
     let sequential = GrevmScheduler::new(SpecId::LATEST, env.clone(), db.clone(), txs.clone());
     let sequential_result = sequential.sequential_execute();
