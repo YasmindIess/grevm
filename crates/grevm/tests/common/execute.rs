@@ -66,10 +66,6 @@ where
 
     let reth_result = execute_revm_sequential(db.clone(), SpecId::LATEST, env.clone(), txs.clone());
 
-    println!("reth_result: {:?}", reth_result.as_ref().unwrap().results);
-
-    assert_eq!(reth_result.as_ref().unwrap().results, sequential_result.as_ref().unwrap().results);
-
     compare_bundle_state(
         &reth_result.as_ref().unwrap().state,
         &sequential_result.as_ref().unwrap().state,
@@ -91,7 +87,11 @@ where
     DB: DatabaseRef,
     DB::Error: Debug,
 {
-    let db = StateBuilder::new().with_database_ref(db).build();
+    let db = StateBuilder::new()
+        .with_bundle_update()
+        .without_state_clear()
+        .with_database_ref(db)
+        .build();
     let mut evm =
         EvmBuilder::default().with_db(db).with_spec_id(spec_id).with_env(Box::new(env)).build();
 

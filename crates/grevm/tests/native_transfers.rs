@@ -1,5 +1,6 @@
 pub mod common;
 
+use crate::common::START_ADDRESS;
 use common::storage::InMemoryDB;
 use reth_revm::db::PlainAccount;
 use revm_primitives::{alloy_primitives::U160, Address, TransactTo, TxEnv, U256};
@@ -73,10 +74,12 @@ fn native_with_same_sender() {
 #[test]
 fn native_with_all_related() {
     let block_size = 100;
-    let accounts: HashMap<Address, PlainAccount> =
-        (0..=block_size + 1).map(common::mock_eoa_account).collect();
+    let mut accounts: HashMap<Address, PlainAccount> =
+        (START_ADDRESS..=START_ADDRESS + block_size).map(common::mock_eoa_account).collect();
+    // // 0 for miner(Address::ZERO)
+    accounts.insert(Address::ZERO, common::mock_eoa_account(0).1);
     let db = InMemoryDB::new(accounts, Default::default(), Default::default());
-    let txs: Vec<TxEnv> = (1..=block_size)
+    let txs: Vec<TxEnv> = (START_ADDRESS..START_ADDRESS + block_size)
         .map(|i| {
             // tx(i) => tx(i+1), all transactions should execute sequentially.
             let from = Address::from(U160::from(i));
