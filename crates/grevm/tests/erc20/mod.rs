@@ -9,7 +9,7 @@ use reth_revm::{
 };
 use revm_primitives::{AccountInfo, Bytecode, B256};
 
-pub const GAS_LIMIT: u64 = 26_938;
+pub const GAS_LIMIT: u64 = 50_000;
 
 // TODO: Better randomness control. Sometimes we want duplicates to test
 // dependent transactions, sometimes we want to guarantee non-duplicates
@@ -60,7 +60,7 @@ pub fn generate_cluster(
 
                 txs.push(TxEnv {
                     caller: *person,
-                    gas_limit: 500_000,
+                    gas_limit: GAS_LIMIT,
                     gas_price: U256::from(0xb2d05e07u64),
                     transact_to: TransactTo::Call(gld_address),
                     data: calldata,

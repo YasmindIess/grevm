@@ -12,10 +12,7 @@ use std::collections::HashMap;
 
 use common::storage::InMemoryDB;
 use erc20::generate_cluster;
-use reth_revm::{
-    db::PlainAccount,
-    primitives::{Address, TxEnv},
-};
+use reth_revm::primitives::TxEnv;
 
 #[test]
 fn erc20_independent() {

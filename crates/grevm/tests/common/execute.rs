@@ -104,7 +104,9 @@ where
     if !with_hints {
         parallel.clean_dependency();
     }
-    let parallel_result = parallel.parallel_execute();
+
+    let parallel_result = parallel.evm_execute(Some(false));
+    println!("parallel execute round: {:?}", parallel.round);
 
     let reth_result = execute_revm_sequential(db.clone(), SpecId::LATEST, env.clone(), txs.clone());
 

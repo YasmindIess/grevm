@@ -60,6 +60,8 @@ where
     pre_unconfirmed_txs: BTreeMap<TxId, PreUnconfirmedContext>,
 
     results: Vec<ExecutionResult>,
+
+    pub round: usize,
 }
 
 pub struct DatabaseWrapper<Error>(Arc<dyn DatabaseRef<Error = Error> + Send + Sync + 'static>);
@@ -134,6 +136,7 @@ where
             num_finality_txs: 0,
             pre_unconfirmed_txs: BTreeMap::new(),
             results: Vec::new(),
+            round: 0,
         }
     }
 
@@ -436,16 +439,15 @@ where
         Ok(())
     }
 
-    /// Note: The tx_type of receipt in the output is unknown, should be set by the caller.
-    fn evm_execute(
-        mut self,
+    pub fn evm_execute(
+        &mut self,
         force_sequential: Option<bool>,
     ) -> Result<ExecuteOutput, GrevmError<DB::Error>> {
         let force_parallel = !force_sequential.unwrap_or(true); // adaptive false
         let force_sequential = force_sequential.unwrap_or(false); // adaptive false
         self.results.reserve(self.txs.len());
 
-        let build_execute_output = |mut this: Self| {
+        let build_execute_output = |this: &mut Self| {
             // MUST drop the `PartitionExecutor::scheduler_db` before get mut
             this.partition_executors.clear();
             let database = Arc::get_mut(&mut this.database).unwrap();
@@ -462,18 +464,20 @@ where
         }
 
         if !force_sequential {
-            for i in 0..MAX_NUM_ROUND {
+            while self.round < MAX_NUM_ROUND {
                 if self.num_finality_txs < self.txs.len() {
                     self.partition_transactions();
                     if self.num_partitions == 1 && !force_parallel {
                         break;
                     }
+                    self.round += 1;
                     self.round_execute()?;
                 } else {
                     break;
                 }
             }
         }
+
         if self.num_finality_txs < self.txs.len() {
             self.execute_remaining_sequential()?;
         }
