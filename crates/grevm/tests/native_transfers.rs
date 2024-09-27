@@ -9,9 +9,9 @@ fn native_transfers_independent() {
     let block_size = 10_000; // number of transactions
     let accounts = common::mock_block_accounts(START_ADDRESS, block_size);
     let db = InMemoryDB::new(accounts, Default::default(), Default::default());
-    let txs: Vec<TxEnv> = (START_ADDRESS..START_ADDRESS + block_size)
+    let txs: Vec<TxEnv> = (0..block_size)
         .map(|i| {
-            let address = Address::from(U160::from(i));
+            let address = Address::from(U160::from(START_ADDRESS + i));
             TxEnv {
                 caller: address,
                 transact_to: TransactTo::Call(address),
@@ -35,10 +35,14 @@ fn native_with_same_sender() {
     let sender_address = Address::from(U160::from(START_ADDRESS));
     let receiver_address = Address::from(U160::from(START_ADDRESS + 1));
     let mut sender_nonce = 0;
-    let txs: Vec<TxEnv> = (START_ADDRESS..START_ADDRESS + block_size)
+    let txs: Vec<TxEnv> = (0..block_size)
         .map(|i| {
             let (address, to, nonce) = if i % 4 != 1 {
-                (Address::from(U160::from(i)), Address::from(U160::from(i)), 1)
+                (
+                    Address::from(U160::from(START_ADDRESS + i)),
+                    Address::from(U160::from(START_ADDRESS + i)),
+                    1,
+                )
             } else {
                 sender_nonce += 1;
                 (sender_address, receiver_address, sender_nonce)
@@ -68,11 +72,11 @@ fn native_with_all_related() {
     let block_size = 100;
     let accounts = common::mock_block_accounts(START_ADDRESS, block_size);
     let db = InMemoryDB::new(accounts, Default::default(), Default::default());
-    let txs: Vec<TxEnv> = (START_ADDRESS..START_ADDRESS + block_size)
+    let txs: Vec<TxEnv> = (0..block_size)
         .map(|i| {
             // tx(i) => tx(i+1), all transactions should execute sequentially.
-            let from = Address::from(U160::from(i));
-            let to = Address::from(U160::from(i + 1));
+            let from = Address::from(U160::from(START_ADDRESS + i));
+            let to = Address::from(U160::from(START_ADDRESS + i + 1));
 
             TxEnv {
                 caller: from,
@@ -93,12 +97,18 @@ fn native_with_unconfirmed_reuse() {
     let block_size = 100;
     let accounts = common::mock_block_accounts(START_ADDRESS, block_size);
     let db = InMemoryDB::new(accounts, Default::default(), Default::default());
-    let txs: Vec<TxEnv> = (START_ADDRESS..START_ADDRESS + block_size)
+    let txs: Vec<TxEnv> = (0..block_size)
         .map(|i| {
             let (from, to) = if i % 10 == 0 {
-                (Address::from(U160::from(i)), Address::from(U160::from(i + 1)))
+                (
+                    Address::from(U160::from(START_ADDRESS + i)),
+                    Address::from(U160::from(START_ADDRESS + i + 1)),
+                )
             } else {
-                (Address::from(U160::from(i)), Address::from(U160::from(i)))
+                (
+                    Address::from(U160::from(START_ADDRESS + i)),
+                    Address::from(U160::from(START_ADDRESS + i)),
+                )
             };
             // tx0 tx10, tx20, tx30 ... tx90 will produce dependency for the next tx,
             // so tx1, tx11, tx21, tx31, tx91 maybe redo on next round.

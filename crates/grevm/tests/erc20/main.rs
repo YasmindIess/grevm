@@ -21,7 +21,8 @@ use reth_revm::{
 fn erc20_independent() {
     const N: usize = 37123;
     let (mut state, bytecodes, txs) = generate_cluster(N, 1, 1);
-    state.insert(Address::ZERO, PlainAccount::default()); // Beneficiary
+    let miner = common::mock_miner_account();
+    state.insert(miner.0, miner.1);
     let db = InMemoryDB::new(state, bytecodes, Default::default());
     common::compare_evm_execute(db, txs, false);
 }
@@ -33,7 +34,7 @@ fn erc20_clusters() {
     const NUM_PEOPLE_PER_FAMILY: usize = 15;
     const NUM_TRANSFERS_PER_PERSON: usize = 15;
 
-    let mut final_state = HashMap::from([(Address::ZERO, PlainAccount::default())]); // Beneficiary
+    let mut final_state = HashMap::from([common::mock_miner_account()]);
     let mut final_bytecodes = HashMap::default();
     let mut final_txs = Vec::<TxEnv>::new();
     for _ in 0..NUM_CLUSTERS {

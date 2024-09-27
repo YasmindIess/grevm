@@ -7,7 +7,9 @@ use reth_revm::db::{BundleAccount, BundleState, PlainAccount};
 use reth_revm::{DatabaseCommit, EvmBuilder, StateBuilder};
 use revm_primitives::alloy_primitives::{U160, U256};
 use revm_primitives::db::DatabaseRef;
-use revm_primitives::{AccountInfo, Address, Env, SpecId, TxEnv, KECCAK_EMPTY};
+use revm_primitives::{
+    AccountInfo, Address, EVMError, Env, ExecutionResult, SpecId, TxEnv, KECCAK_EMPTY,
+};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -49,11 +51,31 @@ fn compare_bundle_state(left: &BundleState, right: &BundleState) {
     }
 }
 
+fn compare_execution_result(left: &Vec<ExecutionResult>, right: &Vec<ExecutionResult>) {
+    for (i, (left_res, right_res)) in left.iter().zip(right.iter()).enumerate() {
+        assert_eq!(left_res, right_res, "Tx {}", i);
+    }
+    assert_eq!(left.len(), right.len());
+}
+
+pub fn mock_miner_account() -> (Address, PlainAccount) {
+    let address = Address::from(U160::from(MINER_ADDRESS));
+    let account = PlainAccount {
+        info: AccountInfo { balance: U256::from(0), nonce: 1, code_hash: KECCAK_EMPTY, code: None },
+        storage: Default::default(),
+    };
+    (address, account)
+}
+
 pub fn mock_eoa_account(idx: usize) -> (Address, PlainAccount) {
     let address = Address::from(U160::from(idx));
-    let balance = if idx == MINER_ADDRESS { U256::from(0) } else { U256::from(500_000_000) };
     let account = PlainAccount {
-        info: AccountInfo { balance, nonce: 1, code_hash: KECCAK_EMPTY, code: None },
+        info: AccountInfo {
+            balance: U256::from(500_000_000),
+            nonce: 1,
+            code_hash: KECCAK_EMPTY,
+            code: None,
+        },
         storage: Default::default(),
     };
     (address, account)
@@ -62,7 +84,8 @@ pub fn mock_eoa_account(idx: usize) -> (Address, PlainAccount) {
 pub fn mock_block_accounts(from: usize, size: usize) -> HashMap<Address, PlainAccount> {
     let mut accounts: HashMap<Address, PlainAccount> =
         (from..(from + size)).map(mock_eoa_account).collect();
-    accounts.insert(Address::from(U160::from(MINER_ADDRESS)), mock_eoa_account(MINER_ADDRESS).1);
+    let miner = mock_miner_account();
+    accounts.insert(miner.0, miner.1);
     accounts
 }
 
@@ -85,6 +108,22 @@ where
 
     let reth_result = execute_revm_sequential(db.clone(), SpecId::LATEST, env.clone(), txs.clone());
 
+    // All txs should be successful
+    for (i, result) in reth_result.as_ref().unwrap().results.iter().enumerate() {
+        assert!(result.is_success(), "{:?}", result);
+        // Print expected results
+        println!("Tx {} {:?}", i, result);
+    }
+
+    compare_execution_result(
+        &reth_result.as_ref().unwrap().results,
+        &sequential_result.as_ref().unwrap().results,
+    );
+    compare_execution_result(
+        &reth_result.as_ref().unwrap().results,
+        &parallel_result.as_ref().unwrap().results,
+    );
+
     compare_bundle_state(
         &reth_result.as_ref().unwrap().state,
         &sequential_result.as_ref().unwrap().state,
@@ -101,7 +140,7 @@ pub(crate) fn execute_revm_sequential<DB>(
     spec_id: SpecId,
     env: Env,
     txs: Vec<TxEnv>,
-) -> Option<ExecuteOutput>
+) -> Result<ExecuteOutput, EVMError<DB::Error>>
 where
     DB: DatabaseRef,
     DB::Error: Debug,
@@ -117,19 +156,12 @@ where
     let mut results = Vec::with_capacity(txs.len());
     for tx in txs {
         *evm.tx_mut() = tx;
-        match evm.transact() {
-            Ok(result_and_state) => {
-                evm.db_mut().commit(result_and_state.state);
-                results.push(result_and_state.result);
-            }
-            Err(err) => {
-                println!("Error: {:?}", err);
-                return None;
-            }
-        }
+        let result_and_state = evm.transact()?;
+        evm.db_mut().commit(result_and_state.state);
+        results.push(result_and_state.result);
     }
 
     evm.db_mut().merge_transitions(BundleRetention::Reverts);
 
-    Some(ExecuteOutput { state: evm.db_mut().take_bundle(), results })
+    Ok(ExecuteOutput { state: evm.db_mut().take_bundle(), results })
 }

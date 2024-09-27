@@ -15,10 +15,7 @@ use std::collections::HashMap;
 
 use crate::uniswap::generate_cluster;
 use common::storage::InMemoryDB;
-use reth_revm::{
-    db::PlainAccount,
-    primitives::{Address, TxEnv},
-};
+use reth_revm::primitives::TxEnv;
 
 #[test]
 fn uniswap_clusters() {
@@ -26,7 +23,7 @@ fn uniswap_clusters() {
     const NUM_PEOPLE_PER_CLUSTER: usize = 20;
     const NUM_SWAPS_PER_PERSON: usize = 20;
 
-    let mut final_state = HashMap::from([(Address::ZERO, PlainAccount::default())]); // Beneficiary
+    let mut final_state = HashMap::from([common::mock_miner_account()]);
     let mut final_bytecodes = HashMap::default();
     let mut final_txs = Vec::<TxEnv>::new();
     for _ in 0..NUM_CLUSTERS {
