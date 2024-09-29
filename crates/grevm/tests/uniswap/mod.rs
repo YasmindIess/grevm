@@ -2,7 +2,7 @@ pub mod contract;
 
 use std::collections::HashMap;
 
-use crate::erc20::contract::ERC20Token;
+use crate::erc20::erc20_contract::ERC20Token;
 use contract::{SingleSwap, SwapRouter, UniswapV3Factory, UniswapV3Pool, WETH9};
 use reth_revm::{
     db::PlainAccount,

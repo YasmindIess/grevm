@@ -1,15 +1,27 @@
-pub mod contract;
+pub mod erc20_contract;
 
 use std::collections::HashMap;
+use reth_primitives::ruint::aliases::U160;
+use reth_revm::db::DbAccount;
 
-use contract::ERC20Token;
 use reth_revm::{
     db::PlainAccount,
     primitives::{uint, Address, TransactTo, TxEnv, U256},
 };
 use revm_primitives::{AccountInfo, Bytecode, B256};
+use reth_primitives::{Account, address};
+use crate::erc20::erc20_contract::{ERC20_TRANSFER, ERC20Token};
 
 pub const GAS_LIMIT: u64 = 50_000;
+
+/// Mapping from address to [EvmAccount]
+pub type ChainState = HashMap<Address, DbAccount>;
+
+/// Mapping from code hashes to [EvmCode]s
+pub type Bytecodes = HashMap<B256, Bytecode>;
+
+/// Mapping from block numbers to block hashes
+pub type BlockHashes = HashMap<u64, B256>;
 
 // TODO: Better randomness control. Sometimes we want duplicates to test
 // dependent transactions, sometimes we want to guarantee non-duplicates
@@ -18,28 +30,107 @@ fn generate_addresses(length: usize) -> Vec<Address> {
     (0..length).map(|_| Address::new(rand::random())).collect()
 }
 
-pub fn generate_cluster(
-    num_families: usize,
-    num_people_per_family: usize,
-    num_transfers_per_person: usize,
-) -> (HashMap<Address, PlainAccount>, HashMap<B256, Bytecode>, Vec<TxEnv>) {
-    let families: Vec<Vec<Address>> =
-        (0..num_families).map(|_| generate_addresses(num_people_per_family)).collect();
+#[derive(Clone, Debug, Copy)]
+pub enum TransactionCallDataType {
+    Empty,
+    Mix,
+    Allowance,
+    Approve,
+    BalanceOf,
+    Decimals,
+    DecreaseAllowance,
+    IncreaseAllowance,
+    Name,
+    Symbol,
+    TotalSupply,
+    Transfer,
+    TransferFrom,
+}
 
-    let people_addresses: Vec<Address> = families.clone().into_iter().flatten().collect();
+#[derive(Clone, Debug, Copy)]
+pub enum TransactionModeType {
+    Random,
+    SameCaller,
+    Empty,
+}
 
-    let gld_address = Address::new(rand::random());
 
-    let gld_account = ERC20Token::new("Gold Token", "GLD", 18, 222_222_000_000_000_000_000_000u128)
-        .add_balances(&people_addresses, uint!(1_000_000_000_000_000_000_U256))
-        .build();
+
+#[derive(Clone, Debug)]
+pub struct TxnBatchConfig {
+    num_eoa: usize,
+    num_sca: usize,
+    num_txns_per_address: usize,
+    transaction_call_data_type: TransactionCallDataType,
+    transaction_mode_type: TransactionModeType,
+}
+
+impl TxnBatchConfig {
+    pub fn new(num_eoa: usize, num_sca: usize, num_txns_per_address: usize,
+               transaction_call_data_type: TransactionCallDataType,
+               transaction_mode_type: TransactionModeType) -> Self {
+        TxnBatchConfig {
+            num_eoa,
+            num_sca,
+            num_txns_per_address,
+            transaction_call_data_type,
+            transaction_mode_type,
+        }
+    }
+}
+
+pub fn generate_erc20_batch(eoa_addresses: Vec<Address>,
+                            sca_addresses: Vec<Address>,
+                            num_transfers_per_eoa: usize,
+                            transaction_call_data_type: TransactionCallDataType,
+                            transaction_mode_type: TransactionModeType) -> Vec<TxEnv> {
+
+    let mut txns = Vec::new();
+
+    for nonce in 0..num_transfers_per_eoa {
+        for caller_index in 0..eoa_addresses.len() {
+            let sender: Address = eoa_addresses[caller_index];
+
+            let recipient: Address = match transaction_mode_type {
+                TransactionModeType::SameCaller => sender,
+                TransactionModeType::Random => eoa_addresses[rand::random::<usize>() % eoa_addresses.len()],
+                TransactionModeType::Empty => Address::new([0; 20]),
+            };
+            let to_address: Address = sca_addresses[rand::random::<usize>() % sca_addresses.len()];
+
+            let mut tx_env = TxEnv {
+                caller: sender,
+                gas_limit: GAS_LIMIT,
+                gas_price: U256::from(0xb2d05e07u64),
+                transact_to: TransactTo::Call(to_address),
+                value: U256::from(0),
+                nonce: Some(nonce as u64),
+                ..TxEnv::default()
+            };
+
+            match transaction_call_data_type {
+                TransactionCallDataType::Transfer => {
+                    tx_env.data = ERC20Token::transfer(recipient, U256::from(rand::random::<u8>()));
+                },
+                TransactionCallDataType::TransferFrom => {
+                    tx_env.data = ERC20Token::transfer_from(
+                        sender, recipient, U256::from(rand::random::<u8>()));
+                },
+                _ => {},
+            }
+            txns.push(tx_env);
+        }
+    }
+    txns
+}
+
+pub fn generate_cluster(txn_batch_config: &TxnBatchConfig) -> (
+    HashMap<Address, PlainAccount>, HashMap<B256, Bytecode>, Vec<TxEnv>) {
 
     let mut state = HashMap::new();
-    state.insert(gld_address, gld_account);
+    let eoa_addresses: Vec<Address> = generate_addresses(txn_batch_config.num_eoa);
 
-    let mut txs = Vec::new();
-
-    for person in people_addresses.iter() {
+    for person in eoa_addresses.iter() {
         state.insert(
             *person,
             PlainAccount {
@@ -52,32 +143,25 @@ pub fn generate_cluster(
         );
     }
 
-    for nonce in 0..num_transfers_per_person {
-        for family in families.iter() {
-            for person in family {
-                let recipient = family[(rand::random::<usize>()) % (family.len())];
-                let calldata = ERC20Token::transfer(recipient, U256::from(rand::random::<u8>()));
+    let mut bytecodes = HashMap::new();
+    let mut erc20_sca: Vec<PlainAccount> = Vec::new();
+    let mut erc20_sca_address: Vec<Address> = Vec::new();
+    for i in 0..txn_batch_config.num_eoa {
+        let gld_address = Address::new(rand::random());
+        erc20_sca_address.push(gld_address);
 
-                txs.push(TxEnv {
-                    caller: *person,
-                    gas_limit: GAS_LIMIT,
-                    gas_price: U256::from(0xb2d05e07u64),
-                    transact_to: TransactTo::Call(gld_address),
-                    data: calldata,
-                    nonce: Some(nonce as u64),
-                    ..TxEnv::default()
-                })
-            }
-        }
+        let gld_account = ERC20Token::new("Gold Token", "GLD", 18, 222_222_000_000_000_000_000_000u128)
+            .add_balances(&eoa_addresses, uint!(1_000_000_000_000_000_000_U256))
+            .build();
+        erc20_sca.push(gld_account.clone());
+        bytecodes.insert(gld_account.info.code_hash, gld_account.info.code.clone().unwrap());
+        state.insert(gld_address, gld_account);
     }
 
-    let mut bytecodes = HashMap::default();
-    for account in state.values_mut() {
-        let code = account.info.code.take();
-        if let Some(code) = code {
-            bytecodes.insert(account.info.code_hash, code);
-        }
-    }
+    let mut txs = generate_erc20_batch(eoa_addresses, erc20_sca_address,
+                                       txn_batch_config.num_txns_per_address,
+                                       txn_batch_config.transaction_call_data_type,
+                                       txn_batch_config.transaction_mode_type);
 
     (state, bytecodes, txs)
 }

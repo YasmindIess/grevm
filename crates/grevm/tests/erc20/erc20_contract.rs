@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use lazy_static::lazy_static;
 
 use reth_revm::{
     db::PlainAccount,
@@ -10,7 +11,25 @@ use revm_primitives::AccountInfo;
 
 use crate::common::storage::{from_address, from_indices, from_short_string, StorageBuilder};
 
-const ERC20_TOKEN: &str = include_str!("./assets/ERC20Token.hex");
+
+const ERC20_TOKEN: &str = include_str!("./contracts/ERC20Token.hex");
+
+// $ forge inspect ERC20Token methods
+
+
+lazy_static! {
+    pub static ref ERC20_ALLLOWANCE: U256 = U256::from(0xdd62ed3e as i64);
+    pub static ref ERC20_APPROVE: U256 = U256::from(0x095ea7b3 as i64);
+    pub static ref ERC20_BALANCE_OF: U256 = U256::from(0x70a08231 as i64);
+    pub static ref ERC20_DECIMALS: U256 = U256::from(0x313ce567 as i64);
+    pub static ref ERC20_DECREASE_ALLOWANCE: U256 = U256::from(0xa457c2d7 as i64);
+    pub static ref ERC20_INCREASE_ALLOWANCE: U256 = U256::from(0x39509351 as i64);
+    pub static ref ERC20_NAME: U256 = U256::from(0x06fdde03 as i64);
+    pub static ref ERC20_SYMBOL: U256 = U256::from(0x95d89b41 as i64);
+    pub static ref ERC20_TOTAL_SUPPLY: U256 = U256::from(0x18160ddd as i64);
+    pub static ref ERC20_TRANSFER: U256 = U256::from(0xa9059cbb as i64);
+    pub static ref ERC20_TRANSFER_FROM: U256 = U256::from(0x23b872dd as i64);
+}
 
 // @risechain/op-test-bench/foundry/src/ERC20Token.sol
 #[derive(Debug, Default)]
@@ -97,28 +116,27 @@ impl ERC20Token {
         }
     }
 
-    // $ forge inspect ERC20Token methods
-    // {
-    //   "allowance(address,address)": "dd62ed3e",
-    //   "approve(address,uint256)": "095ea7b3",
-    //   "balanceOf(address)": "70a08231",
-    //   "decimals()": "313ce567",
-    //   "decreaseAllowance(address,uint256)": "a457c2d7",
-    //   "increaseAllowance(address,uint256)": "39509351",
-    //   "name()": "06fdde03",
-    //   "symbol()": "95d89b41",
-    //   "totalSupply()": "18160ddd",
-    //   "transfer(address,uint256)": "a9059cbb",
-    //   "transferFrom(address,address,uint256)": "23b872dd"
-    // }
     pub fn transfer(recipient: Address, amount: U256) -> Bytes {
         Bytes::from(
             [
                 &fixed_bytes!("a9059cbb")[..],
+                // ERC20_TRANSFER.to(),
                 &B256::from(from_address(recipient))[..],
                 &B256::from(amount)[..],
             ]
             .concat(),
+        )
+    }
+
+    pub fn transfer_from(sender: Address, recipient: Address, amount: U256) -> Bytes {
+        Bytes::from(
+            [
+                &fixed_bytes!("23b872dd")[..],
+                &B256::from(from_address(sender))[..],
+                &B256::from(from_address(recipient))[..],
+                &B256::from(amount)[..],
+            ]
+                .concat(),
         )
     }
 }
