@@ -322,7 +322,7 @@ impl<DB> PartitionDB<DB> {
                         None => {
                             rewards = Some(account.info.balance.to());
                             miner_updated = true;
-                        },
+                        }
                     },
                     None => panic!("Miner should be cached"),
                 }

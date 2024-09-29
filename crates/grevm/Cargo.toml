@@ -42,6 +42,11 @@ reth-revm = { workspace = true, features = ["test-utils"] }
 reth-primitives = { workspace = true, features = ["secp256k1"] }
 secp256k1.workspace = true
 serde_json.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "gigagas"
+harness = false
 
 [features]
 default = ["std"]
