@@ -17,7 +17,7 @@ pub(crate) struct InMemoryDB {
 }
 
 impl InMemoryDB {
-    pub(crate) fn new(
+    pub fn new(
         accounts: HashMap<Address, PlainAccount>,
         bytecodes: HashMap<B256, Bytecode>,
         block_hashes: HashMap<u64, B256>,

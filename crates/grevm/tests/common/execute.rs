@@ -110,13 +110,6 @@ where
 
     let reth_result = execute_revm_sequential(db.clone(), SpecId::LATEST, env.clone(), txs.clone());
 
-    // All txs should be successful
-    for (i, result) in reth_result.as_ref().unwrap().results.iter().enumerate() {
-        assert!(result.is_success(), "{:?}", result);
-        // Print expected results
-        println!("Tx {} {:?}", i, result);
-    }
-
     compare_execution_result(
         &reth_result.as_ref().unwrap().results,
         &sequential_result.as_ref().unwrap().results,

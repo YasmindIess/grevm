@@ -35,7 +35,7 @@ type TxId = usize;
 enum LocationAndType {
     Basic(Address),
     Storage(Address, U256),
-    Code(B256 /* code_hash */),
+    Code(Address),
 }
 
 #[derive(Debug)]

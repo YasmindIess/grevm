@@ -1,16 +1,16 @@
 pub mod erc20_contract;
 
-use std::collections::HashMap;
 use reth_primitives::ruint::aliases::U160;
 use reth_revm::db::DbAccount;
+use std::collections::HashMap;
 
+use crate::erc20::erc20_contract::{ERC20Token, ERC20_TRANSFER};
+use reth_primitives::{address, Account};
 use reth_revm::{
     db::PlainAccount,
     primitives::{uint, Address, TransactTo, TxEnv, U256},
 };
 use revm_primitives::{AccountInfo, Bytecode, B256};
-use reth_primitives::{Account, address};
-use crate::erc20::erc20_contract::{ERC20_TRANSFER, ERC20Token};
 
 pub const GAS_LIMIT: u64 = 50_000;
 
@@ -54,8 +54,6 @@ pub enum TransactionModeType {
     Empty,
 }
 
-
-
 #[derive(Clone, Debug)]
 pub struct TxnBatchConfig {
     num_eoa: usize,
@@ -66,9 +64,13 @@ pub struct TxnBatchConfig {
 }
 
 impl TxnBatchConfig {
-    pub fn new(num_eoa: usize, num_sca: usize, num_txns_per_address: usize,
-               transaction_call_data_type: TransactionCallDataType,
-               transaction_mode_type: TransactionModeType) -> Self {
+    pub fn new(
+        num_eoa: usize,
+        num_sca: usize,
+        num_txns_per_address: usize,
+        transaction_call_data_type: TransactionCallDataType,
+        transaction_mode_type: TransactionModeType,
+    ) -> Self {
         TxnBatchConfig {
             num_eoa,
             num_sca,
@@ -79,12 +81,13 @@ impl TxnBatchConfig {
     }
 }
 
-pub fn generate_erc20_batch(eoa_addresses: Vec<Address>,
-                            sca_addresses: Vec<Address>,
-                            num_transfers_per_eoa: usize,
-                            transaction_call_data_type: TransactionCallDataType,
-                            transaction_mode_type: TransactionModeType) -> Vec<TxEnv> {
-
+pub fn generate_erc20_batch(
+    eoa_addresses: Vec<Address>,
+    sca_addresses: Vec<Address>,
+    num_transfers_per_eoa: usize,
+    transaction_call_data_type: TransactionCallDataType,
+    transaction_mode_type: TransactionModeType,
+) -> Vec<TxEnv> {
     let mut txns = Vec::new();
 
     for nonce in 0..num_transfers_per_eoa {
@@ -93,7 +96,9 @@ pub fn generate_erc20_batch(eoa_addresses: Vec<Address>,
 
             let recipient: Address = match transaction_mode_type {
                 TransactionModeType::SameCaller => sender,
-                TransactionModeType::Random => eoa_addresses[rand::random::<usize>() % eoa_addresses.len()],
+                TransactionModeType::Random => {
+                    eoa_addresses[rand::random::<usize>() % eoa_addresses.len()]
+                }
                 TransactionModeType::Empty => Address::new([0; 20]),
             };
             let to_address: Address = sca_addresses[rand::random::<usize>() % sca_addresses.len()];
@@ -111,12 +116,15 @@ pub fn generate_erc20_batch(eoa_addresses: Vec<Address>,
             match transaction_call_data_type {
                 TransactionCallDataType::Transfer => {
                     tx_env.data = ERC20Token::transfer(recipient, U256::from(rand::random::<u8>()));
-                },
+                }
                 TransactionCallDataType::TransferFrom => {
                     tx_env.data = ERC20Token::transfer_from(
-                        sender, recipient, U256::from(rand::random::<u8>()));
-                },
-                _ => {},
+                        sender,
+                        recipient,
+                        U256::from(rand::random::<u8>()),
+                    );
+                }
+                _ => {}
             }
             txns.push(tx_env);
         }
@@ -124,9 +132,9 @@ pub fn generate_erc20_batch(eoa_addresses: Vec<Address>,
     txns
 }
 
-pub fn generate_cluster(txn_batch_config: &TxnBatchConfig) -> (
-    HashMap<Address, PlainAccount>, HashMap<B256, Bytecode>, Vec<TxEnv>) {
-
+pub fn generate_cluster(
+    txn_batch_config: &TxnBatchConfig,
+) -> (HashMap<Address, PlainAccount>, HashMap<B256, Bytecode>, Vec<TxEnv>) {
     let mut state = HashMap::new();
     let eoa_addresses: Vec<Address> = generate_addresses(txn_batch_config.num_eoa);
 
@@ -150,18 +158,22 @@ pub fn generate_cluster(txn_batch_config: &TxnBatchConfig) -> (
         let gld_address = Address::new(rand::random());
         erc20_sca_address.push(gld_address);
 
-        let gld_account = ERC20Token::new("Gold Token", "GLD", 18, 222_222_000_000_000_000_000_000u128)
-            .add_balances(&eoa_addresses, uint!(1_000_000_000_000_000_000_U256))
-            .build();
+        let gld_account =
+            ERC20Token::new("Gold Token", "GLD", 18, 222_222_000_000_000_000_000_000u128)
+                .add_balances(&eoa_addresses, uint!(1_000_000_000_000_000_000_U256))
+                .build();
         erc20_sca.push(gld_account.clone());
         bytecodes.insert(gld_account.info.code_hash, gld_account.info.code.clone().unwrap());
         state.insert(gld_address, gld_account);
     }
 
-    let mut txs = generate_erc20_batch(eoa_addresses, erc20_sca_address,
-                                       txn_batch_config.num_txns_per_address,
-                                       txn_batch_config.transaction_call_data_type,
-                                       txn_batch_config.transaction_mode_type);
+    let mut txs = generate_erc20_batch(
+        eoa_addresses,
+        erc20_sca_address,
+        txn_batch_config.num_txns_per_address,
+        txn_batch_config.transaction_call_data_type,
+        txn_batch_config.transaction_mode_type,
+    );
 
     (state, bytecodes, txs)
 }

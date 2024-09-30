@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use lazy_static::lazy_static;
+use std::collections::HashMap;
 
 use reth_revm::{
     db::PlainAccount,
@@ -11,11 +11,9 @@ use revm_primitives::AccountInfo;
 
 use crate::common::storage::{from_address, from_indices, from_short_string, StorageBuilder};
 
-
 const ERC20_TOKEN: &str = include_str!("./contracts/ERC20Token.hex");
 
 // $ forge inspect ERC20Token methods
-
 
 lazy_static! {
     pub static ref ERC20_ALLLOWANCE: U256 = U256::from(0xdd62ed3e as i64);
@@ -136,7 +134,7 @@ impl ERC20Token {
                 &B256::from(from_address(recipient))[..],
                 &B256::from(amount)[..],
             ]
-                .concat(),
+            .concat(),
         )
     }
 }
