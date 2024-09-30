@@ -5,9 +5,30 @@ use revm_primitives::TxEnv;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use reth_primitives::{B256, Bytes, hex};
+use reth_primitives::ruint::aliases::U256;
 
-pub(crate) type ReadKVSet = BTreeMap<Address, Option<DbAccount>>;
-pub(crate) type WriteKVSet = BTreeMap<Address, Option<DbAccount>>;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub enum HintAccountState {
+    #[default]
+    Touched,
+    Loaded,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HintAccount {
+    state: HintAccountState,
+    account: DbAccount,
+}
+
+pub(crate) type ReadKVSet = BTreeMap<Address, HintAccount>;
+pub(crate) type WriteKVSet = BTreeMap<Address, HintAccount>;
+
+enum RWType {
+    ReadOnly,
+    WriteOnly,
+    ReadWrite,
+}
 
 #[derive(Debug, Default)]
 pub(crate) struct TxRWSet {
@@ -16,29 +37,47 @@ pub(crate) struct TxRWSet {
     pub write_kv_set: RefCell<WriteKVSet>,
 }
 
-enum RWType {
-    ReadOnly,
-    WriteOnly,
-    ReadWrite,
-}
-
 impl TxRWSet {
-    pub(crate) fn insert_key_value(
-        &self,
-        key: &Address,
-        value: Option<DbAccount>,
+    pub(crate) fn insert_account(
+        &mut self,
+        address: &Address,
         rw_type: RWType,
     ) {
         match rw_type {
             RWType::ReadOnly => {
-                self.read_kv_set.borrow_mut().insert(key.clone(), value.clone());
+                self.read_kv_set.borrow_mut().entry(address.clone()).or_insert(HintAccount::default());
             }
             RWType::WriteOnly => {
-                self.write_kv_set.borrow_mut().insert(key.clone(), value.clone());
+                self.write_kv_set.borrow_mut().entry(address.clone()).or_insert(HintAccount::default());
             }
             RWType::ReadWrite => {
-                self.read_kv_set.borrow_mut().insert(key.clone(), value.clone());
-                self.write_kv_set.borrow_mut().insert(key.clone(), value.clone());
+                self.read_kv_set.borrow_mut().entry(address.clone()).or_insert(HintAccount::default());
+                self.write_kv_set.borrow_mut().entry(address.clone()).or_insert(HintAccount::default());
+            }
+        }
+    }
+
+    pub(crate) fn insert_storage_slot(
+        &mut self,
+        address: &Address,
+        storage_slot: U256,
+        storage_slot_value: U256,
+        rw_type: RWType,
+    ) {
+        match rw_type {
+            RWType::ReadOnly => {
+                let mut read_kv_set = self.read_kv_set.borrow_mut();
+                read_kv_set.get_mut(address).unwrap().account.storage.entry(storage_slot).or_insert(storage_slot_value);
+            }
+            RWType::WriteOnly => {
+                let mut write_kv_set = self.write_kv_set.borrow_mut();
+                write_kv_set.get_mut(address).unwrap().account.storage.entry(storage_slot).or_insert(storage_slot_value);
+            }
+            RWType::ReadWrite => {
+                let mut read_kv_set = self.read_kv_set.borrow_mut();
+                read_kv_set.get_mut(address).unwrap().account.storage.entry(storage_slot).or_insert(storage_slot_value);
+                let mut write_kv_set = self.write_kv_set.borrow_mut();
+                write_kv_set.get_mut(address).unwrap().account.storage.entry(storage_slot).or_insert(storage_slot_value);
             }
         }
     }
@@ -58,16 +97,13 @@ impl ParallelExecutionHints {
             // Causing transactions that call the same contract to inevitably
             // conflict with each other. Is this behavior reasonable?
             // TODO(gaoxin): optimize contract account
-            rw_set.insert_key_value(&tx_env.caller, None, RWType::ReadWrite);
+            rw_set.insert_account(&tx_env.caller, RWType::ReadWrite);
             if let TxKind::Call(to_address) = tx_env.transact_to {
-                rw_set.insert_key_value(&to_address, None, RWType::ReadWrite);
-
                 if (!tx_env.data.is_empty()) {
                     ParallelExecutionHints::insert_hints_with_contract_data(
-                        None, &tx_env.data, &mut rw_set);
+                        to_address, None, &tx_env.data, &mut rw_set);
                 }
             }
-            rw_set.insert_key_value(&tx_env.caller, None, RWType::ReadWrite);
 
             hints.push(rw_set);
         }
@@ -75,7 +111,8 @@ impl ParallelExecutionHints {
         ParallelExecutionHints { txs_hint: hints }
     }
 
-    fn insert_hints_with_contract_data(code: Option<Bytes>, data: &Bytes, tx_rw_set: &mut TxRWSet) {
+    fn insert_hints_with_contract_data(contract_address: Address, code: Option<Bytes>,
+                                       data: &Bytes, tx_rw_set: &mut TxRWSet) {
         // It should return if code is empty or data is empty
         // TODO(gravity_richard.zhz): refactor here after preloading the code
         if code.is_none() && data.is_empty() {
@@ -85,14 +122,17 @@ impl ParallelExecutionHints {
         let (func_id, parameters) = Self::decode_contract_parameters(data);
         // TODO(gravity_richard.zhz): refactor the judgement later with contract template
         // ERC20_transfer
+        for p in parameters.iter() {
+            tx_rw_set.insert_storage_slot(&contract_address, U256::from_be_bytes(p.0), U256::from(0), RWType::ReadWrite);
+        }
+        // TODO(gravity_richard.zhz): just for test and delete later
         if func_id == 0xa9059cbb {
             assert_eq!(data.len(), 68);
             assert_eq!(parameters.len(), 2);
             let from_address: [u8; 20] = parameters[0].as_slice()[12..].try_into().expect("try into failed");
             let from_address = Address::new(from_address);
             // println!("from_address {:?}", from_address);
-            // TODO(gravity_richard.zhz): refactor the RWSet later
-            tx_rw_set.insert_key_value(&from_address, None, RWType::ReadWrite);
+            tx_rw_set.insert_account(&from_address, RWType::ReadWrite);
         } else if func_id == 0x23b872dd {
             // ERC20_transfer_from
             assert_eq!(data.len(), 100);
@@ -102,9 +142,10 @@ impl ParallelExecutionHints {
             let to_address: [u8; 20] = parameters[1].as_slice()[12..].try_into().expect("try into failed");
             let to_address = Address::new(to_address);
             // println!("from_address {:?}, to_address {:?}", from_address, to_address);
-            // TODO(gravity_richard.zhz): refactor the RWSet later
-            tx_rw_set.insert_key_value(&from_address, None, RWType::ReadWrite);
-            tx_rw_set.insert_key_value(&to_address, None, RWType::ReadWrite);
+            tx_rw_set.insert_account(&from_address, RWType::ReadWrite);
+            tx_rw_set.insert_account(&to_address, RWType::ReadWrite);
+        } else {
+            tx_rw_set.insert_account(&contract_address, RWType::ReadWrite);
         }
     }
 
