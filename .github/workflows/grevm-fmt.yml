@@ -1,0 +1,27 @@
+name: Grevm Format Check
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  fmt_check:
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Install rustfmt
+        run: rustup component add rustfmt
+
+      - name: Run cargo fmt
+        run: cargo fmt -p reth-grevm --check
