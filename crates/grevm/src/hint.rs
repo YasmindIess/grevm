@@ -149,7 +149,11 @@ impl ParallelExecutionHints {
         if code.is_none() && data.is_empty() {
             return;
         }
-        println!("code {:?} data {:?}", code, data);
+        // println!("code {:?} data {:?}", code, data);
+        if data.len() < 4 || (data.len() - 4) % 32 != 0 {
+            // Invalid tx, or tx that triggers fallback CALL
+            return;
+        }
         let (func_id, parameters) = Self::decode_contract_parameters(data);
         // TODO(gravity_richard.zhz): refactor the judgement later with contract template
         // ERC20_transfer
