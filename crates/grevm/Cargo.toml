@@ -36,6 +36,9 @@ rand = { workspace = true }
 auto_impl = { workspace = true }
 lazy_static = "1.5.0"
 
+# metrics
+metrics.workspace = true
+
 [dev-dependencies]
 reth-testing-utils.workspace = true
 reth-revm = { workspace = true, features = ["test-utils"] }
@@ -43,6 +46,7 @@ reth-primitives = { workspace = true, features = ["secp256k1"] }
 secp256k1.workspace = true
 serde_json.workspace = true
 criterion.workspace = true
+metrics-util.workspace = true
 walkdir = "2.5.0"
 rayon = "1.10.0"
 revme = "0.10.0"

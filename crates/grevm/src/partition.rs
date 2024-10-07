@@ -1,34 +1,19 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use revm_primitives::db::DatabaseRef;
-use revm_primitives::{Address, Env, SpecId, TxEnv, TxKind, U256};
+use revm_primitives::{Address, Env, SpecId, TxEnv, TxKind};
 
-use reth_revm::db::DbAccount;
 use reth_revm::EvmBuilder;
 
-use crate::hint::TxRWSet;
 use crate::storage::{PartitionDB, SchedulerDB};
-use crate::{
-    GrevmResult, LocationAndType, PartitionId, ResultAndTransition, TransactionStatus, TxId,
-};
+use crate::{GrevmResult, LocationAndType, PartitionId, ResultAndTransition, TxId};
 
-#[derive(Debug, Clone, PartialEq)]
-enum PartitionStatus {
-    Normal,
-    Blocked,
-    Finalized,
-}
-
-#[derive(Debug)]
-pub(crate) struct Partition {
-    finalized_tx_index: TxId,
-    current_tx_index: TxId,
-    partition_status: PartitionStatus,
-    txs_status: Vec<TransactionStatus>,
-    pending_tx_result: BTreeMap<TxId, TxRWSet>,
-    partition_rw_set: TxRWSet,
-    cache_data: BTreeMap<Address, DbAccount>,
+#[derive(Default)]
+pub struct PartitionMetrics {
+    pub execute_time: Duration,
+    pub reusable_tx_cnt: u64,
 }
 
 /// Add some binary search methods for ordered vectors
@@ -93,6 +78,8 @@ where
     pub tx_dependency: Vec<BTreeSet<TxId>>,
 
     pub pre_round_ctx: Option<PreRoundContext>,
+
+    pub metrics: PartitionMetrics,
 }
 
 impl<DB> PartitionExecutor<DB>
@@ -124,6 +111,7 @@ where
             unconfirmed_txs: vec![],
             tx_dependency: vec![],
             pre_round_ctx: None,
+            metrics: Default::default(),
         }
     }
 
@@ -132,6 +120,7 @@ where
     }
 
     pub(crate) fn execute(&mut self) {
+        let start = Instant::now();
         let mut update_write_set: HashSet<LocationAndType> = HashSet::new();
         let mut evm = EvmBuilder::default()
             .with_db(&mut self.partition_db)
@@ -173,6 +162,7 @@ where
                         evm.db_mut().temporary_commit_transition(&execute_state.transition);
                         self.execute_results.push(Ok(execute_state));
                         should_rerun = false;
+                        self.metrics.reusable_tx_cnt += 1;
                     }
                 }
             }
@@ -226,5 +216,6 @@ where
             }
         }
         assert_eq!(self.assigned_txs.len(), self.execute_results.len());
+        self.metrics.execute_time = start.elapsed();
     }
 }

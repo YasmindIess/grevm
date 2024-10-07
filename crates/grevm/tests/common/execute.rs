@@ -1,6 +1,7 @@
 use crate::common::MINER_ADDRESS;
+use metrics_util::debugging::DebuggingRecorder;
 use reth_chainspec::NamedChain;
-use reth_grevm::{ExecuteOutput, GrevmScheduler};
+use reth_grevm::{ExecuteOutput, GrevmError, GrevmScheduler};
 use reth_revm::db::states::bundle_state::BundleRetention;
 use reth_revm::db::states::StorageSlot;
 use reth_revm::db::{BundleAccount, BundleState, PlainAccount};
@@ -94,19 +95,30 @@ where
     DB: DatabaseRef + Send + Sync + 'static,
     DB::Error: Send + Sync + Clone + Debug,
 {
+    // create registry for metrics
+    let recorder = DebuggingRecorder::new();
+
     let mut env = Env::default();
     env.cfg.chain_id = NamedChain::Mainnet.into();
     env.block.coinbase = Address::from(U160::from(MINER_ADDRESS));
     let db = Arc::new(db);
     let sequential = GrevmScheduler::new(SpecId::LATEST, env.clone(), db.clone(), txs.clone());
     let sequential_result = sequential.sequential_execute();
-    let mut parallel = GrevmScheduler::new(SpecId::LATEST, env.clone(), db.clone(), txs.clone());
-    if !with_hints {
-        parallel.clean_dependency();
-    }
 
-    let parallel_result = parallel.evm_execute(Some(false));
-    println!("parallel execute round: {:?}", parallel.round);
+    let mut parallel_result = Err(GrevmError::UnreachableError(String::from("Init")));
+    metrics::with_local_recorder(&recorder, || {
+        let mut parallel =
+            GrevmScheduler::new(SpecId::LATEST, env.clone(), db.clone(), txs.clone());
+        if !with_hints {
+            parallel.clean_dependency();
+        }
+        parallel_result = parallel.evm_execute(Some(false));
+
+        let snapshot = recorder.snapshotter().snapshot();
+        for (key, unit, desc, value) in snapshot.into_vec() {
+            println!("metrics: {} => value: {:?}", key.key().name(), value);
+        }
+    });
 
     let reth_result = execute_revm_sequential(db.clone(), SpecId::LATEST, env.clone(), txs.clone());
 
