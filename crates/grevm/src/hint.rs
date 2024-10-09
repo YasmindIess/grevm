@@ -1,29 +1,14 @@
-use std::cell::RefCell;
-use std::collections::BTreeMap;
-
 use alloy_sol_types::private::primitives::TxKind;
 use alloy_sol_types::private::Address;
 use revm_primitives::TxEnv;
+use smallvec::SmallVec;
 
 use reth_primitives::ruint::aliases::U256;
 use reth_primitives::{Bytes, B256};
-use reth_revm::db::DbAccount;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub enum HintAccountState {
-    #[default]
-    Touched,
-    Loaded,
-}
+use crate::LocationAndType;
 
-#[derive(Debug, Clone, Default)]
-pub struct HintAccount {
-    state: HintAccountState,
-    account: DbAccount,
-}
-
-pub(crate) type ReadKVSet = BTreeMap<Address, HintAccount>;
-pub(crate) type WriteKVSet = BTreeMap<Address, HintAccount>;
+type LocationVec = SmallVec<[LocationAndType; 2]>;
 
 enum RWType {
     ReadOnly,
@@ -31,80 +16,35 @@ enum RWType {
     ReadWrite,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone)]
 pub(crate) struct TxRWSet {
-    // the key contains the address prefix
-    pub read_kv_set: RefCell<ReadKVSet>,
-    pub write_kv_set: RefCell<WriteKVSet>,
+    pub read_set: LocationVec,
+    pub write_set: LocationVec,
+}
+
+impl Default for TxRWSet {
+    fn default() -> Self {
+        Self { read_set: LocationVec::new(), write_set: LocationVec::new() }
+    }
 }
 
 impl TxRWSet {
-    pub(crate) fn insert_account(&mut self, address: &Address, rw_type: RWType) {
+    pub(crate) fn insert_location(&mut self, location: LocationAndType, rw_type: RWType) {
         match rw_type {
             RWType::ReadOnly => {
-                self.read_kv_set.borrow_mut().entry(address.clone()).or_default();
+                self.read_set.push(location);
             }
             RWType::WriteOnly => {
-                self.write_kv_set.borrow_mut().entry(address.clone()).or_default();
+                self.write_set.push(location);
             }
             RWType::ReadWrite => {
-                self.read_kv_set.borrow_mut().entry(address.clone()).or_default();
-                self.write_kv_set.borrow_mut().entry(address.clone()).or_default();
-            }
-        }
-    }
-
-    pub(crate) fn insert_storage_slot(
-        &mut self,
-        address: &Address,
-        storage_slot: U256,
-        storage_slot_value: U256,
-        rw_type: RWType,
-    ) {
-        match rw_type {
-            RWType::ReadOnly => {
-                let mut read_kv_set = self.read_kv_set.borrow_mut();
-                read_kv_set
-                    .entry(*address)
-                    .or_default()
-                    .account
-                    .storage
-                    .entry(storage_slot)
-                    .or_insert(storage_slot_value);
-            }
-            RWType::WriteOnly => {
-                let mut write_kv_set = self.write_kv_set.borrow_mut();
-                write_kv_set
-                    .entry(*address)
-                    .or_default()
-                    .account
-                    .storage
-                    .entry(storage_slot)
-                    .or_insert(storage_slot_value);
-            }
-            RWType::ReadWrite => {
-                let mut read_kv_set = self.read_kv_set.borrow_mut();
-                read_kv_set
-                    .entry(*address)
-                    .or_default()
-                    .account
-                    .storage
-                    .entry(storage_slot)
-                    .or_insert(storage_slot_value);
-                let mut write_kv_set = self.write_kv_set.borrow_mut();
-                write_kv_set
-                    .entry(*address)
-                    .or_default()
-                    .account
-                    .storage
-                    .entry(storage_slot)
-                    .or_insert(storage_slot_value);
+                self.read_set.push(location.clone());
+                self.write_set.push(location);
             }
         }
     }
 }
 
-#[derive(Debug, Default)]
 pub struct ParallelExecutionHints {
     pub txs_hint: Vec<TxRWSet>,
 }
@@ -112,14 +52,14 @@ pub struct ParallelExecutionHints {
 impl ParallelExecutionHints {
     #[fastrace::trace]
     pub(crate) fn new(txs: &Vec<TxEnv>) -> Self {
-        let mut hints: Vec<TxRWSet> = Vec::with_capacity(txs.len());
+        let mut hints: Vec<TxRWSet> = vec![TxRWSet::default(); txs.len()];
 
-        for tx_env in txs {
-            let mut rw_set = TxRWSet::default();
+        for (index, tx_env) in txs.iter().enumerate() {
+            let mut rw_set = &mut hints[index];
             // Causing transactions that call the same contract to inevitably
             // conflict with each other. Is this behavior reasonable?
             // TODO(gaoxin): optimize contract account
-            rw_set.insert_account(&tx_env.caller, RWType::ReadWrite);
+            rw_set.insert_location(LocationAndType::Basic(tx_env.caller), RWType::ReadWrite);
             if let TxKind::Call(to_address) = tx_env.transact_to {
                 if !tx_env.data.is_empty() {
                     ParallelExecutionHints::insert_hints_with_contract_data(
@@ -129,11 +69,9 @@ impl ParallelExecutionHints {
                         &mut rw_set,
                     );
                 } else {
-                    rw_set.insert_account(&to_address, RWType::ReadWrite);
+                    rw_set.insert_location(LocationAndType::Basic(to_address), RWType::ReadWrite);
                 }
             }
-
-            hints.push(rw_set);
         }
 
         ParallelExecutionHints { txs_hint: hints }
@@ -160,10 +98,8 @@ impl ParallelExecutionHints {
         // TODO(gravity_richard.zhz): refactor the judgement later with contract template
         // ERC20_transfer
         for p in parameters.iter() {
-            tx_rw_set.insert_storage_slot(
-                &contract_address,
-                U256::from_be_bytes(p.0),
-                U256::from(0),
+            tx_rw_set.insert_location(
+                LocationAndType::Storage(contract_address, U256::from_be_bytes(p.0)),
                 RWType::ReadWrite,
             );
         }
@@ -175,7 +111,7 @@ impl ParallelExecutionHints {
                 parameters[0].as_slice()[12..].try_into().expect("try into failed");
             let from_address = Address::new(from_address);
             // println!("from_address {:?}", from_address);
-            tx_rw_set.insert_account(&from_address, RWType::ReadWrite);
+            tx_rw_set.insert_location(LocationAndType::Basic(from_address), RWType::ReadWrite);
         } else if func_id == 0x23b872dd {
             // ERC20_transfer_from
             assert_eq!(data.len(), 100);
@@ -187,10 +123,10 @@ impl ParallelExecutionHints {
                 parameters[1].as_slice()[12..].try_into().expect("try into failed");
             let to_address = Address::new(to_address);
             // println!("from_address {:?}, to_address {:?}", from_address, to_address);
-            tx_rw_set.insert_account(&from_address, RWType::ReadWrite);
-            tx_rw_set.insert_account(&to_address, RWType::ReadWrite);
+            tx_rw_set.insert_location(LocationAndType::Basic(from_address), RWType::ReadWrite);
+            tx_rw_set.insert_location(LocationAndType::Basic(to_address), RWType::ReadWrite);
         } else {
-            tx_rw_set.insert_account(&contract_address, RWType::ReadWrite);
+            tx_rw_set.insert_location(LocationAndType::Basic(contract_address), RWType::ReadWrite);
         }
     }
 
@@ -211,10 +147,5 @@ impl ParallelExecutionHints {
         // println!("parameters {:?}", parameters);
 
         (func_id, parameters)
-    }
-
-    pub(crate) fn update_tx_hint(&mut self, tx_index: usize, new_tx_rw_set: TxRWSet) {
-        self.txs_hint[tx_index].read_kv_set = new_tx_rw_set.read_kv_set;
-        self.txs_hint[tx_index].write_kv_set = new_tx_rw_set.write_kv_set;
     }
 }

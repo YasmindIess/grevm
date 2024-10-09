@@ -1,10 +1,8 @@
 use std::cmp::{min, Reverse};
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, VecDeque};
 
-use revm_primitives::Address;
-
 use crate::hint::ParallelExecutionHints;
-use crate::TxId;
+use crate::{LocationAndType, TxId};
 
 pub(crate) struct TxDependency {
     // if txi <- txj, then tx_dependency[txj - num_finality_txs].push(txi)
@@ -37,21 +35,22 @@ impl TxDependency {
 
     #[fastrace::trace]
     fn generate_tx_dependency(parallel_execution_hints: &ParallelExecutionHints) -> Vec<Vec<TxId>> {
-        let mut tx_dependency: Vec<Vec<TxId>> = vec![];
-        let mut write_set: HashMap<Address, BTreeSet<TxId>> = HashMap::new();
+        let mut tx_dependency: Vec<Vec<TxId>> =
+            Vec::with_capacity(parallel_execution_hints.txs_hint.len());
+        let mut write_set: HashMap<LocationAndType, Vec<TxId>> = HashMap::new();
         for (txid, rw_set) in parallel_execution_hints.txs_hint.iter().enumerate() {
-            let mut dependencies = BTreeSet::new();
-            for (address, _) in rw_set.read_kv_set.borrow().iter() {
-                if let Some(written_transactions) = write_set.get(address) {
-                    if let Some(previous) = written_transactions.range(..txid).next_back() {
-                        dependencies.insert(*previous);
+            let mut dependencies = vec![];
+            for location in rw_set.read_set.iter() {
+                if let Some(written_transactions) = write_set.get(location) {
+                    if let Some(previous) = written_transactions.last() {
+                        dependencies.push(*previous);
                     }
                 }
             }
-            for (address, _) in rw_set.write_kv_set.borrow().iter() {
-                write_set.entry(*address).or_default().insert(txid);
+            for location in rw_set.write_set.iter() {
+                write_set.entry(location.clone()).or_default().push(txid);
             }
-            tx_dependency.push(dependencies.into_iter().collect());
+            tx_dependency.push(dependencies);
         }
         return tx_dependency;
     }

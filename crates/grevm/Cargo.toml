@@ -40,6 +40,9 @@ lazy_static = "1.5.0"
 # metrics
 metrics.workspace = true
 
+# small vector
+smallvec.workspace = true
+
 [dev-dependencies]
 reth-testing-utils.workspace = true
 reth-revm = { workspace = true, features = ["test-utils"] }
