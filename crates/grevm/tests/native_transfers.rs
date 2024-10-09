@@ -4,6 +4,34 @@ use crate::common::{MINER_ADDRESS, START_ADDRESS};
 use common::storage::InMemoryDB;
 use revm_primitives::{alloy_primitives::U160, Address, TransactTo, TxEnv, U256};
 
+const GIGA_GAS: u64 = 1_000_000_000;
+
+#[test]
+fn gigagas() {
+    let block_size = (GIGA_GAS as f64 / common::TRANSFER_GAS_LIMIT as f64).ceil() as usize;
+    // block_size = 10
+    //
+    let accounts = common::mock_block_accounts(START_ADDRESS, block_size);
+    let db = InMemoryDB::new(accounts, Default::default(), Default::default());
+    // START_ADDRESS + block_size
+    // let txs: Vec<TxEnv> = (1..=block_size)
+    let txs: Vec<TxEnv> = (0..block_size)
+        .map(|i| {
+            let address = Address::from(U160::from(START_ADDRESS + i));
+            TxEnv {
+                caller: address,
+                transact_to: TransactTo::Call(address),
+                value: U256::from(1),
+                gas_limit: common::TRANSFER_GAS_LIMIT,
+                gas_price: U256::from(1),
+                nonce: None,
+                ..TxEnv::default()
+            }
+        })
+        .collect();
+    common::compare_evm_execute(db, txs, true);
+}
+
 #[test]
 fn native_transfers_independent() {
     let block_size = 10_000; // number of transactions

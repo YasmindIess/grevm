@@ -14,6 +14,7 @@ use revm_primitives::{
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 use std::sync::Arc;
+use std::time::Instant;
 
 fn compare_bundle_state(left: &BundleState, right: &BundleState) {
     let left = left.clone();
@@ -102,17 +103,21 @@ where
     env.cfg.chain_id = NamedChain::Mainnet.into();
     env.block.coinbase = Address::from(U160::from(MINER_ADDRESS));
     let db = Arc::new(db);
+    let start = Instant::now();
     let sequential = GrevmScheduler::new(SpecId::LATEST, env.clone(), db.clone(), txs.clone());
     let sequential_result = sequential.sequential_execute();
+    println!("Grevm sequential execute time: {}ms", start.elapsed().as_millis());
 
     let mut parallel_result = Err(GrevmError::UnreachableError(String::from("Init")));
     metrics::with_local_recorder(&recorder, || {
+        let start = Instant::now();
         let mut parallel =
             GrevmScheduler::new(SpecId::LATEST, env.clone(), db.clone(), txs.clone());
         if !with_hints {
             parallel.clean_dependency();
         }
         parallel_result = parallel.evm_execute(Some(false));
+        println!("Grevm parallel execute time: {}ms", start.elapsed().as_millis());
 
         let snapshot = recorder.snapshotter().snapshot();
         for (key, unit, desc, value) in snapshot.into_vec() {
@@ -120,7 +125,9 @@ where
         }
     });
 
+    let start = Instant::now();
     let reth_result = execute_revm_sequential(db.clone(), SpecId::LATEST, env.clone(), txs.clone());
+    println!("Origin sequential execute time: {}ms", start.elapsed().as_millis());
 
     compare_execution_result(
         &reth_result.as_ref().unwrap().results,
