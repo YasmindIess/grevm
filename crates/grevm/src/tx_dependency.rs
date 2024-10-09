@@ -35,6 +35,7 @@ impl TxDependency {
         self.tx_dependency = vec![vec![]; len];
     }
 
+    #[fastrace::trace]
     fn generate_tx_dependency(parallel_execution_hints: &ParallelExecutionHints) -> Vec<Vec<TxId>> {
         let mut tx_dependency: Vec<Vec<TxId>> = vec![];
         let mut write_set: HashMap<Address, BTreeSet<TxId>> = HashMap::new();

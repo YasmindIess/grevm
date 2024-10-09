@@ -1,3 +1,4 @@
+use fastrace::Span;
 use revm_primitives::db::DatabaseRef;
 use revm_primitives::Bytecode;
 use revm_primitives::{
@@ -5,7 +6,6 @@ use revm_primitives::{
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::DerefMut;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -207,6 +207,7 @@ where
         s
     }
 
+    #[fastrace::trace]
     pub(crate) fn partition_transactions(&mut self) {
         // compute and assign partitioned_txs
         let start = Instant::now();
@@ -248,6 +249,7 @@ where
         }
     }
 
+    #[fastrace::trace]
     fn round_execute(&mut self) -> Result<(), GrevmError<DB::Error>> {
         self.metrics.parallel_execute_calls.increment(1);
         self.partition_executors.clear();
@@ -279,6 +281,7 @@ where
     }
 
     // merge write set after each round
+    #[fastrace::trace]
     fn merge_write_set(&mut self) -> HashMap<LocationAndType, BTreeSet<TxId>> {
         let mut merged_write_set: HashMap<LocationAndType, BTreeSet<TxId>> = HashMap::new();
         let mut write_set_size = 0;
@@ -299,6 +302,7 @@ where
     /// But there are some transactions that have entered the finality state,
     /// and there is no need to record the dependency and dependent relationships of these transactions.
     /// Thus achieving the purpose of pruning.
+    #[fastrace::trace]
     fn update_and_pruning_dependency(&mut self) {
         let num_finality_txs = self.num_finality_txs;
         if num_finality_txs == self.txs.len() {
@@ -325,8 +329,11 @@ where
     /// verification of transaction state after each round
     /// Because after each round execution, the read-write set is no longer updated.
     /// We can check in parallel whether the read set is out of bounds.
+    #[fastrace::trace]
     fn validate_transactions(&mut self) -> Result<(), GrevmError<DB::Error>> {
         let start = Instant::now();
+        let span = Span::enter_with_local_parent("generate unconfirmed txs");
+
         GREVM_RUNTIME.block_on(async {
             let mut tasks = vec![];
             let merged_write_set = Arc::new(self.merge_write_set());
@@ -376,7 +383,9 @@ where
             }
             futures::future::join_all(tasks).await;
         });
+        std::mem::drop(span);
         // find the continuous min txid
+        let span = Span::enter_with_local_parent("find the continuous min txid");
         let mut unconfirmed_txs = BTreeMap::new();
         let mut min_execute_time = Duration::from_secs(u64::MAX);
         let mut max_execute_time = Duration::from_secs(0);
@@ -434,6 +443,7 @@ where
             }
         }
 
+        std::mem::drop(span);
         self.pre_unconfirmed_txs = unconfirmed_txs.split_off(&self.num_finality_txs);
         // Now `unconfirmed_txs` only contains the txs that are finality in this round
         let finality_txs = unconfirmed_txs;
@@ -461,6 +471,7 @@ where
 
         Self::merge_not_modified_state(&mut database.cache, partition_state);
 
+        let span = Span::enter_with_local_parent("commit transition to scheduler db");
         let mut rewards: u128 = 0;
         for ctx in finality_txs.into_values() {
             rewards += ctx.execute_state.rewards;
@@ -475,6 +486,7 @@ where
         database
             .increment_balances(vec![(self.coinbase, rewards)])
             .map_err(|err| GrevmError::EvmError(EVMError::Database(err)))?;
+        std::mem::drop(span);
 
         self.metrics.validate_time.increment(start.elapsed().as_nanos() as u64);
         Ok(())
@@ -482,6 +494,7 @@ where
 
     /// Merge not modified state from partition to scheduler. These data are just loaded from
     /// database, so we can merge them to state as original value for next round.
+    #[fastrace::trace]
     fn merge_not_modified_state(state: &mut CacheState, partition_state: Vec<CacheState>) {
         for partition in partition_state {
             // merge account state that is not modified
@@ -500,6 +513,7 @@ where
         }
     }
 
+    #[fastrace::trace]
     fn execute_remaining_sequential(&mut self) -> Result<(), GrevmError<DB::Error>> {
         self.metrics.sequential_execute_calls.increment(1);
         self.metrics.sequential_tx_cnt.increment((self.txs.len() - self.num_finality_txs) as u64);
@@ -528,6 +542,7 @@ where
         Ok(())
     }
 
+    #[fastrace::trace]
     pub fn evm_execute(
         &mut self,
         force_sequential: Option<bool>,

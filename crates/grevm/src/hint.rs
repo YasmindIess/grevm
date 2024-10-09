@@ -110,6 +110,7 @@ pub struct ParallelExecutionHints {
 }
 
 impl ParallelExecutionHints {
+    #[fastrace::trace]
     pub(crate) fn new(txs: &Vec<TxEnv>) -> Self {
         let mut hints: Vec<TxRWSet> = Vec::with_capacity(txs.len());
 
@@ -138,6 +139,7 @@ impl ParallelExecutionHints {
         ParallelExecutionHints { txs_hint: hints }
     }
 
+    #[fastrace::trace]
     fn insert_hints_with_contract_data(
         contract_address: Address,
         code: Option<Bytes>,

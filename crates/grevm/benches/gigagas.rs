@@ -3,11 +3,14 @@
 use std::sync::Arc;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use fastrace::collector::Config;
 
 #[path = "../tests/common/mod.rs"]
 pub mod common;
 
 use common::storage::InMemoryDB;
+use fastrace::prelude::*;
+use fastrace_jaeger::JaegerReporter;
 use reth_chainspec::NamedChain;
 use reth_grevm::GrevmScheduler;
 use revm_primitives::alloy_primitives::U160;
@@ -66,7 +69,7 @@ fn bench_raw_transfers(c: &mut Criterion, db_latency_us: u64) {
         c,
         "Independent Raw Transfers",
         db,
-        (1..=block_size)
+        (0..block_size)
             .map(|i| {
                 let address = Address::from(U160::from(common::START_ADDRESS + i));
                 TxEnv {
@@ -83,11 +86,22 @@ fn bench_raw_transfers(c: &mut Criterion, db_latency_us: u64) {
 }
 
 fn benchmark_gigagas(c: &mut Criterion) {
-    // TODO(gravity): Create options from toml file if there are more
-    let db_latency_us = std::env::var_os("DB_LATENCY_US")
-        .map(|s| s.to_string_lossy().parse().unwrap())
-        .unwrap_or(0);
-    bench_raw_transfers(c, db_latency_us);
+    let reporter = JaegerReporter::new("127.0.0.1:6831".parse().unwrap(), "gigagas").unwrap();
+    fastrace::set_reporter(reporter, Config::default().report_before_root_finish(true));
+
+    {
+        let root = Span::root("benchmark_gigagas", SpanContext::random());
+
+        let _guard = root.set_local_parent();
+
+        // TODO(gravity): Create options from toml file if there are more
+        let db_latency_us = std::env::var_os("DB_LATENCY_US")
+            .map(|s| s.to_string_lossy().parse().unwrap())
+            .unwrap_or(0);
+        bench_raw_transfers(c, db_latency_us);
+    }
+
+    fastrace::flush();
 }
 
 criterion_group!(benches, benchmark_gigagas);

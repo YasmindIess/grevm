@@ -21,6 +21,7 @@ reth-revm.workspace = true
 reth-ethereum-consensus.workspace = true
 reth-prune-types.workspace = true
 reth-execution-types.workspace = true
+fastrace = "0.7"
 
 # Ethereum
 revm-primitives.workspace = true
@@ -50,6 +51,8 @@ metrics-util.workspace = true
 walkdir = "2.5.0"
 rayon = "1.10.0"
 revme = "0.10.0"
+fastrace = { version = "0.7", features = ["enable"] }
+fastrace-jaeger = "0.7"
 
 [[bench]]
 name = "gigagas"
