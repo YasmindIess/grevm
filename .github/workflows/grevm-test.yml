@@ -2,8 +2,9 @@ name: Grevm Tests
 
 on:
   pull_request:
-    branches:
-      - main
+    branches: [ "main" ]
+  merge_group:
+    types: [checks_requested]
 
 jobs:
   build:
