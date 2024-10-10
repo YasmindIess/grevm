@@ -69,10 +69,10 @@ impl<DBError: Display> Display for GrevmError<DBError> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResultAndTransition {
     /// Status of execution
-    pub result: ExecutionResult,
+    pub result: Option<ExecutionResult>,
     /// State that got updated
     pub transition: Vec<(Address, TransitionAccount)>,
     /// Rewards to miner

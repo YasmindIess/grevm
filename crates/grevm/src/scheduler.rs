@@ -391,7 +391,7 @@ where
         let mut min_execute_time = Duration::from_secs(u64::MAX);
         let mut max_execute_time = Duration::from_secs(0);
         for executor in &self.partition_executors {
-            let executor = executor.read().unwrap();
+            let mut executor = executor.write().unwrap();
             self.metrics.reusable_tx_cnt.increment(executor.metrics.reusable_tx_cnt);
             min_execute_time = min_execute_time.min(executor.metrics.execute_time);
             max_execute_time = max_execute_time.max(executor.metrics.execute_time);
@@ -400,17 +400,19 @@ where
                     return Err(GrevmError::EvmError(err.clone()));
                 }
             }
-            for (txid, index) in executor.unconfirmed_txs.iter() {
-                let index = *index;
-                match &executor.execute_results[index] {
+
+            let partition_unconfirmed_txs = std::mem::take(&mut executor.unconfirmed_txs);
+            let mut partition_execute_state = std::mem::take(&mut executor.execute_results);
+
+            for (txid, index) in partition_unconfirmed_txs.into_iter() {
+                match &mut partition_execute_state[index] {
                     Ok(state) => {
                         unconfirmed_txs.insert(
-                            *txid,
+                            txid,
                             PreUnconfirmedContext {
-                                read_set: executor.read_set[index].clone(),
-                                write_set: executor.write_set[index].clone(),
-                                // FIXME(gravity): clone is not necessary
-                                execute_state: state.clone(),
+                                read_set: std::mem::take(&mut executor.read_set[index]),
+                                write_set: std::mem::take(&mut executor.write_set[index]),
+                                execute_state: std::mem::take(state),
                             },
                         );
                     }
@@ -476,7 +478,7 @@ where
         let mut rewards: u128 = 0;
         for ctx in finality_txs.into_values() {
             rewards += ctx.execute_state.rewards;
-            self.results.push(ctx.execute_state.result);
+            self.results.push(ctx.execute_state.result.unwrap());
             database.commit_transition(ctx.execute_state.transition);
         }
         // Each transaction updates three accounts: from, to, and coinbase.

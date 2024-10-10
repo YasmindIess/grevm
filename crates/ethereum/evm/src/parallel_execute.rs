@@ -7,7 +7,7 @@ use reth_evm::{
     ConfigureEvm,
 };
 use reth_execution_types::{BlockExecutionInput, BlockExecutionOutput};
-use reth_grevm::{new_grevm_scheduler, GrevmScheduler};
+use reth_grevm::new_grevm_scheduler;
 
 use reth_primitives::{BlockWithSenders, Receipt};
 use revm_primitives::{BlockEnv, CfgEnvWithHandlerCfg, EnvWithHandlerCfg, TxEnv};

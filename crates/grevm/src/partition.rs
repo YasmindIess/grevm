@@ -187,7 +187,7 @@ where
                         // temporary commit to cache_db, to make use the remaining txs can read the updated data
                         let transition = evm.db_mut().temporary_commit(result_and_state.state);
                         self.execute_results.push(Ok(ResultAndTransition {
-                            result: result_and_state.result,
+                            result: Some(result_and_state.result),
                             transition,
                             rewards: rewards.unwrap_or(0),
                         }));
