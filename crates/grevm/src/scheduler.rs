@@ -18,7 +18,7 @@ use crate::partition::{
     OrderedVectorExt, PartitionExecutor, PreRoundContext, PreUnconfirmedContext,
 };
 use crate::storage::SchedulerDB;
-use crate::tx_dependency::TxDependency;
+use crate::tx_dependency::{DependentTxsVec, TxDependency};
 use crate::{
     GrevmError, LocationAndType, PartitionId, TxId, CPU_CORES, GREVM_RUNTIME, MAX_NUM_ROUND,
 };
@@ -308,7 +308,8 @@ where
         if num_finality_txs == self.txs.len() {
             return;
         }
-        let mut new_dependency: Vec<Vec<TxId>> = vec![vec![]; self.txs.len() - num_finality_txs];
+        let mut new_dependency: Vec<DependentTxsVec> =
+            vec![DependentTxsVec::new(); self.txs.len() - num_finality_txs];
         for executor in &self.partition_executors {
             let executor = executor.read().unwrap();
             for (txid, dep) in executor.assigned_txs.iter().zip(executor.tx_dependency.iter()) {
