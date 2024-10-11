@@ -4,10 +4,8 @@ use reth_primitives::ruint::aliases::U256;
 use reth_primitives::{Bytes, B256};
 use revm_primitives::TxEnv;
 use smallvec::SmallVec;
-use std::ops::DerefMut;
-use std::sync::Mutex;
 
-use crate::{fork_join_util, LocationAndType, CPU_CORES};
+use crate::{fork_join_util, LocationAndType};
 
 type LocationVec = SmallVec<[LocationAndType; 2]>;
 
@@ -53,17 +51,12 @@ pub struct ParallelExecutionHints {
 impl ParallelExecutionHints {
     #[fastrace::trace]
     pub(crate) fn new(txs: &Vec<TxEnv>) -> Self {
-        let parallel_cnt = *CPU_CORES * 2 + 1;
-        let mut hints: Vec<Mutex<Vec<TxRWSet>>> = Vec::with_capacity(parallel_cnt);
-        for _ in 0..parallel_cnt {
-            hints.push(Mutex::new(Vec::with_capacity(txs.len() / parallel_cnt + 1)));
-        }
-        fork_join_util(txs.len(), Some(parallel_cnt), |start_txs, end_txs, part| {
-            let mut rw_set_vec = hints[part].lock().unwrap();
-            let rw_set_vec = rw_set_vec.deref_mut();
+        let mut hints = vec![TxRWSet::default(); txs.len()];
+        fork_join_util(txs.len(), None, |start_txs, end_txs, _| {
             for index in start_txs..end_txs {
                 let tx_env = &txs[index];
-                let mut rw_set = TxRWSet::default();
+                #[allow(invalid_reference_casting)]
+                let rw_set = unsafe { &mut *(&hints[index] as *const TxRWSet as *mut TxRWSet) };
                 // Causing transactions that call the same contract to inevitably
                 // conflict with each other. Is this behavior reasonable?
                 // TODO(gaoxin): optimize contract account
@@ -75,7 +68,7 @@ impl ParallelExecutionHints {
                                 to_address,
                                 None,
                                 &tx_env.data,
-                                &mut rw_set,
+                                rw_set,
                             );
                         } else {
                             rw_set.insert_location(
@@ -85,15 +78,10 @@ impl ParallelExecutionHints {
                         }
                     }
                 }
-                rw_set_vec.push(rw_set);
             }
         });
-        let mut txs_hint = Vec::with_capacity(txs.len());
-        for part in hints.into_iter().map(|h| h.into_inner().unwrap()) {
-            txs_hint.extend(part);
-        }
 
-        ParallelExecutionHints { txs_hint }
+        ParallelExecutionHints { txs_hint: hints }
     }
 
     #[fastrace::trace]

@@ -1,12 +1,11 @@
-use dashmap::DashMap;
-use smallvec::SmallVec;
 use std::cmp::{min, Reverse};
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+
+use dashmap::DashMap;
+use smallvec::SmallVec;
 
 use crate::hint::ParallelExecutionHints;
-use crate::{fork_join_util, LocationAndType, TxId, CPU_CORES};
+use crate::{fork_join_util, LocationAndType, TxId};
 
 pub(crate) type DependentTxsVec = SmallVec<[TxId; 1]>;
 
@@ -24,19 +23,15 @@ pub(crate) struct TxDependency {
     // In the first round, weights can be assigned based on transaction type and called contract type,
     // while in the second round, weights can be assigned based on tx_running_time.
     tx_weight: Option<Vec<usize>>,
-    all_independent: bool,
 }
 
 impl TxDependency {
     pub fn new(parallel_execution_hints: &ParallelExecutionHints) -> Self {
-        let (tx_dependency, all_independent) =
-            Self::generate_tx_dependency(parallel_execution_hints);
         TxDependency {
-            tx_dependency,
+            tx_dependency: Self::generate_tx_dependency(parallel_execution_hints),
             num_finality_txs: 0,
             tx_running_time: None,
             tx_weight: None,
-            all_independent,
         }
     }
 
@@ -48,7 +43,7 @@ impl TxDependency {
     #[fastrace::trace]
     fn generate_tx_dependency(
         parallel_execution_hints: &ParallelExecutionHints,
-    ) -> (Vec<DependentTxsVec>, bool) {
+    ) -> Vec<DependentTxsVec> {
         let write_set: DashMap<LocationAndType, BTreeSet<TxId>> = DashMap::new();
         let num_txs = parallel_execution_hints.txs_hint.len();
         fork_join_util(num_txs, None, |start_pos, end_pos, _| {
@@ -59,56 +54,26 @@ impl TxDependency {
             }
         });
 
-        let parallel_cnt = *CPU_CORES * 2 + 1;
-        let mut tx_dependency: Vec<Mutex<Vec<DependentTxsVec>>> = Vec::with_capacity(parallel_cnt);
-        for _ in 0..parallel_cnt {
-            tx_dependency.push(Mutex::new(Vec::with_capacity(num_txs / parallel_cnt + 1)));
-        }
-        let all_independent = AtomicBool::new(true);
-        fork_join_util(num_txs, Some(parallel_cnt), |start_pos, end_pos, part| {
-            let mut tx_dependency = tx_dependency[part].lock().unwrap();
+        let mut tx_dependency = vec![DependentTxsVec::new(); num_txs];
+        fork_join_util(num_txs, None, |start_pos, end_pos, _| {
             for pos in start_pos..end_pos {
-                let mut dep_txs = DependentTxsVec::new();
+                #[allow(invalid_reference_casting)]
+                let dep_txs = unsafe {
+                    &mut *(&tx_dependency[pos] as *const DependentTxsVec as *mut DependentTxsVec)
+                };
                 for location in parallel_execution_hints.txs_hint[pos].read_set.iter() {
                     if let Some(ws) = write_set.get(location) {
                         if let Some(previous) = ws.range(..pos).next_back() {
                             dep_txs.push(*previous);
-                            all_independent.store(false, Ordering::Release);
                         }
                     }
                 }
-                tx_dependency.push(dep_txs);
             }
         });
-        let mut tx_deps = Vec::with_capacity(num_txs);
-        for deps in tx_dependency.into_iter().map(|dep| dep.into_inner().unwrap()) {
-            tx_deps.extend(deps);
-        }
-        (tx_deps, all_independent.load(Ordering::Acquire))
-    }
-
-    fn all_independent_partitions(&mut self, partition_count: usize) -> Vec<Vec<TxId>> {
-        let num_txs = self.tx_dependency.len();
-        let num_partitions = min(partition_count, num_txs);
-        let remaining = num_txs % num_partitions;
-        let chunk_size = num_txs / num_partitions;
-        let capacity = if remaining == 0 { chunk_size } else { chunk_size + 1 };
-        let mut partitioned_txs = vec![Vec::with_capacity(capacity); num_partitions];
-        for index in 0..num_partitions {
-            let start_tx = chunk_size * index + min(index, remaining) + self.num_finality_txs;
-            let mut end_tx = start_tx + chunk_size;
-            if index < remaining {
-                end_tx += 1;
-            }
-            partitioned_txs[index].extend(start_tx..end_tx);
-        }
-        partitioned_txs
+        tx_dependency
     }
 
     pub fn fetch_best_partitions(&mut self, partition_count: usize) -> Vec<Vec<TxId>> {
-        if self.all_independent {
-            return self.all_independent_partitions(partition_count);
-        }
         let mut num_group = 0;
         let mut weighted_group: BTreeMap<usize, Vec<DependentTxsVec>> = BTreeMap::new();
         let tx_weight = self
@@ -190,17 +155,17 @@ impl TxDependency {
         if num_partitions == 0 {
             return vec![vec![]];
         }
-        let mut partitioned_mutex_group = Vec::with_capacity(num_partitions);
-        for _ in 0..num_partitions {
-            partitioned_mutex_group.push(Mutex::new(BTreeSet::new()));
-        }
+        let mut partitioned_group: Vec<BTreeSet<TxId>> = vec![BTreeSet::new(); num_partitions];
         let mut partition_weight = BinaryHeap::new();
         // Separate processing of groups with a weight of 1
         // Because there is only one transaction in these groups,
         // processing them separately can greatly optimize performance.
         if let Some(groups) = weighted_group.remove(&RAW_TRANSFER_WEIGHT) {
-            fork_join_util(groups.len(), Some(num_partitions), |start_pos, end_pos, index| {
-                let mut partition = partitioned_mutex_group[index].lock().unwrap();
+            fork_join_util(groups.len(), Some(num_partitions), |start_pos, end_pos, part| {
+                #[allow(invalid_reference_casting)]
+                let mut partition = unsafe {
+                    &mut *(&partitioned_group[part] as *const BTreeSet<TxId> as *mut BTreeSet<TxId>)
+                };
                 for pos in start_pos..end_pos {
                     for txid in groups[pos].iter() {
                         partition.insert(*txid);
@@ -208,10 +173,6 @@ impl TxDependency {
                 }
             });
         }
-        let mut partitioned_group: Vec<BTreeSet<TxId>> = partitioned_mutex_group
-            .into_iter()
-            .map(|partition| partition.into_inner().unwrap())
-            .collect();
         for index in 0..num_partitions {
             partition_weight
                 .push(Reverse((partitioned_group[index].len() * RAW_TRANSFER_WEIGHT, index)));
