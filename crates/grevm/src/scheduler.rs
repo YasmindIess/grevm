@@ -228,6 +228,10 @@ where
         self.metrics.partition_tx_time.increment(start.elapsed().as_nanos() as u64);
     }
 
+    pub fn set_num_partitions(&mut self, num_partitions: usize) {
+        self.num_partitions = num_partitions;
+    }
+
     pub fn clean_dependency(&mut self) {
         self.tx_dependencies.clean_dependency();
     }

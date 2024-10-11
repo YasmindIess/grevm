@@ -1,11 +1,12 @@
-use crate::hint::ParallelExecutionHints;
-use crate::{LocationAndType, TxId};
+use dashmap::DashMap;
 use smallvec::SmallVec;
 use std::cmp::{min, Reverse};
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::thread;
+
+use crate::hint::ParallelExecutionHints;
+use crate::{fork_join_util, LocationAndType, TxId, CPU_CORES};
 
 pub(crate) type DependentTxsVec = SmallVec<[TxId; 1]>;
 
@@ -23,15 +24,19 @@ pub(crate) struct TxDependency {
     // In the first round, weights can be assigned based on transaction type and called contract type,
     // while in the second round, weights can be assigned based on tx_running_time.
     tx_weight: Option<Vec<usize>>,
+    all_independent: bool,
 }
 
 impl TxDependency {
     pub fn new(parallel_execution_hints: &ParallelExecutionHints) -> Self {
+        let (tx_dependency, all_independent) =
+            Self::generate_tx_dependency(parallel_execution_hints);
         TxDependency {
-            tx_dependency: Self::generate_tx_dependency(parallel_execution_hints),
+            tx_dependency,
             num_finality_txs: 0,
             tx_running_time: None,
             tx_weight: None,
+            all_independent,
         }
     }
 
@@ -43,28 +48,67 @@ impl TxDependency {
     #[fastrace::trace]
     fn generate_tx_dependency(
         parallel_execution_hints: &ParallelExecutionHints,
-    ) -> Vec<DependentTxsVec> {
-        let mut tx_dependency: Vec<DependentTxsVec> =
-            Vec::with_capacity(parallel_execution_hints.txs_hint.len());
-        let mut write_set: HashMap<LocationAndType, Vec<TxId>> = HashMap::new();
-        for (txid, rw_set) in parallel_execution_hints.txs_hint.iter().enumerate() {
-            let mut dependencies = DependentTxsVec::new();
-            for location in rw_set.read_set.iter() {
-                if let Some(written_transactions) = write_set.get(location) {
-                    if let Some(previous) = written_transactions.last() {
-                        dependencies.push(*previous);
-                    }
+    ) -> (Vec<DependentTxsVec>, bool) {
+        let write_set: DashMap<LocationAndType, BTreeSet<TxId>> = DashMap::new();
+        let num_txs = parallel_execution_hints.txs_hint.len();
+        fork_join_util(num_txs, None, |start_pos, end_pos, _| {
+            for pos in start_pos..end_pos {
+                for location in parallel_execution_hints.txs_hint[pos].write_set.iter() {
+                    write_set.entry(location.clone()).or_default().insert(pos);
                 }
             }
-            for location in rw_set.write_set.iter() {
-                write_set.entry(location.clone()).or_default().push(txid);
-            }
-            tx_dependency.push(dependencies);
+        });
+
+        let parallel_cnt = *CPU_CORES * 2 + 1;
+        let mut tx_dependency: Vec<Mutex<Vec<DependentTxsVec>>> = Vec::with_capacity(parallel_cnt);
+        for _ in 0..parallel_cnt {
+            tx_dependency.push(Mutex::new(Vec::with_capacity(num_txs / parallel_cnt + 1)));
         }
-        return tx_dependency;
+        let all_independent = AtomicBool::new(true);
+        fork_join_util(num_txs, Some(parallel_cnt), |start_pos, end_pos, part| {
+            let mut tx_dependency = tx_dependency[part].lock().unwrap();
+            for pos in start_pos..end_pos {
+                let mut dep_txs = DependentTxsVec::new();
+                for location in parallel_execution_hints.txs_hint[pos].read_set.iter() {
+                    if let Some(ws) = write_set.get(location) {
+                        if let Some(previous) = ws.range(..pos).next_back() {
+                            dep_txs.push(*previous);
+                            all_independent.store(false, Ordering::Release);
+                        }
+                    }
+                }
+                tx_dependency.push(dep_txs);
+            }
+        });
+        let mut tx_deps = Vec::with_capacity(num_txs);
+        for deps in tx_dependency.into_iter().map(|dep| dep.into_inner().unwrap()) {
+            tx_deps.extend(deps);
+        }
+        (tx_deps, all_independent.load(Ordering::Acquire))
+    }
+
+    fn all_independent_partitions(&mut self, partition_count: usize) -> Vec<Vec<TxId>> {
+        let num_txs = self.tx_dependency.len();
+        let num_partitions = min(partition_count, num_txs);
+        let remaining = num_txs % num_partitions;
+        let chunk_size = num_txs / num_partitions;
+        let capacity = if remaining == 0 { chunk_size } else { chunk_size + 1 };
+        let mut partitioned_txs = vec![Vec::with_capacity(capacity); num_partitions];
+        for index in 0..num_partitions {
+            let start_tx = chunk_size * index + min(index, remaining) + self.num_finality_txs;
+            let mut end_tx = start_tx + chunk_size;
+            if index < remaining {
+                end_tx += 1;
+            }
+            partitioned_txs[index].extend(start_tx..end_tx);
+        }
+        partitioned_txs
     }
 
     pub fn fetch_best_partitions(&mut self, partition_count: usize) -> Vec<Vec<TxId>> {
+        if self.all_independent {
+            return self.all_independent_partitions(partition_count);
+        }
         let mut num_group = 0;
         let mut weighted_group: BTreeMap<usize, Vec<DependentTxsVec>> = BTreeMap::new();
         let tx_weight = self
@@ -155,21 +199,12 @@ impl TxDependency {
         // Because there is only one transaction in these groups,
         // processing them separately can greatly optimize performance.
         if let Some(groups) = weighted_group.remove(&RAW_TRANSFER_WEIGHT) {
-            let chunk_size = (groups.len() as f64 / num_partitions as f64).ceil() as usize;
-            let partition_index = AtomicUsize::new(0);
-            thread::scope(|scope| {
-                for _ in 0..num_partitions {
-                    scope.spawn(|| {
-                        let index = partition_index.fetch_add(1, Ordering::SeqCst);
-                        let start_pos = chunk_size * index;
-                        let end_pos = min(groups.len(), start_pos + chunk_size);
-                        let mut partition = partitioned_mutex_group[index].lock().unwrap();
-                        for pos in start_pos..end_pos {
-                            for txid in groups[pos].iter() {
-                                partition.insert(*txid);
-                            }
-                        }
-                    });
+            fork_join_util(groups.len(), Some(num_partitions), |start_pos, end_pos, index| {
+                let mut partition = partitioned_mutex_group[index].lock().unwrap();
+                for pos in start_pos..end_pos {
+                    for txid in groups[pos].iter() {
+                        partition.insert(*txid);
+                    }
                 }
             });
         }

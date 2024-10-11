@@ -1,8 +1,10 @@
-use std::fmt::{Display, Formatter};
-
 use lazy_static::lazy_static;
 use reth_revm::TransitionAccount;
-use revm_primitives::{Address, EVMError, EVMResultGeneric, ExecutionResult, B256, U256};
+use revm_primitives::{Address, EVMError, EVMResultGeneric, ExecutionResult, U256};
+use std::cmp::min;
+use std::fmt::{Display, Formatter};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 use tokio::runtime::{Builder, Runtime};
 mod hint;
 mod partition;
@@ -82,3 +84,26 @@ pub struct ResultAndTransition {
 pub type GrevmResult<DBError> = EVMResultGeneric<ResultAndTransition, DBError>;
 
 pub use scheduler::*;
+
+pub fn fork_join_util<'scope, F>(num_elements: usize, num_partitions: Option<usize>, f: F)
+where
+    F: Fn(usize, usize, usize) + Send + Sync + 'scope,
+{
+    let parallel_cnt = num_partitions.unwrap_or(*CPU_CORES * 2 + 1);
+    let index = AtomicUsize::new(0);
+    let remaining = num_elements % parallel_cnt;
+    let chunk_size = num_elements / parallel_cnt;
+    thread::scope(|scope| {
+        for _ in 0..parallel_cnt {
+            scope.spawn(|| {
+                let index = index.fetch_add(1, Ordering::SeqCst);
+                let start_pos = chunk_size * index + min(index, remaining);
+                let mut end_pos = start_pos + chunk_size;
+                if index < remaining {
+                    end_pos += 1;
+                }
+                f(start_pos, end_pos, index);
+            });
+        }
+    });
+}

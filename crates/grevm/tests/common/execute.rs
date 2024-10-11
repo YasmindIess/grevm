@@ -1,5 +1,5 @@
 use crate::common::MINER_ADDRESS;
-use metrics_util::debugging::DebuggingRecorder;
+use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use reth_chainspec::NamedChain;
 use reth_grevm::{ExecuteOutput, GrevmError, GrevmScheduler};
 use reth_revm::db::states::bundle_state::BundleRetention;
@@ -91,8 +91,12 @@ pub fn mock_block_accounts(from: usize, size: usize) -> HashMap<Address, PlainAc
     accounts
 }
 
-pub fn compare_evm_execute<DB>(db: DB, txs: Vec<TxEnv>, with_hints: bool)
-where
+pub fn compare_evm_execute<DB>(
+    db: DB,
+    txs: Vec<TxEnv>,
+    with_hints: bool,
+    parallel_metrics: HashMap<&str, DebugValue>,
+) where
     DB: DatabaseRef + Send + Sync + 'static,
     DB::Error: Send + Sync + Clone + Debug,
 {
@@ -116,12 +120,16 @@ where
         if !with_hints {
             parallel.clean_dependency();
         }
+        parallel.set_num_partitions(23); // set determined partitions
         parallel_result = parallel.evm_execute(Some(false));
         println!("Grevm parallel execute time: {}ms", start.elapsed().as_millis());
 
         let snapshot = recorder.snapshotter().snapshot();
         for (key, unit, desc, value) in snapshot.into_vec() {
             println!("metrics: {} => value: {:?}", key.key().name(), value);
+            if let Some(metric) = parallel_metrics.get(key.key().name()) {
+                assert_eq!(*metric, value);
+            }
         }
     });
 

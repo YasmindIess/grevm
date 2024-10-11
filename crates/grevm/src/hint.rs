@@ -1,12 +1,13 @@
 use alloy_sol_types::private::primitives::TxKind;
 use alloy_sol_types::private::Address;
-use revm_primitives::TxEnv;
-use smallvec::SmallVec;
-
 use reth_primitives::ruint::aliases::U256;
 use reth_primitives::{Bytes, B256};
+use revm_primitives::TxEnv;
+use smallvec::SmallVec;
+use std::ops::DerefMut;
+use std::sync::Mutex;
 
-use crate::LocationAndType;
+use crate::{fork_join_util, LocationAndType, CPU_CORES};
 
 type LocationVec = SmallVec<[LocationAndType; 2]>;
 
@@ -52,29 +53,47 @@ pub struct ParallelExecutionHints {
 impl ParallelExecutionHints {
     #[fastrace::trace]
     pub(crate) fn new(txs: &Vec<TxEnv>) -> Self {
-        let mut hints: Vec<TxRWSet> = vec![TxRWSet::default(); txs.len()];
-
-        for (index, tx_env) in txs.iter().enumerate() {
-            let mut rw_set = &mut hints[index];
-            // Causing transactions that call the same contract to inevitably
-            // conflict with each other. Is this behavior reasonable?
-            // TODO(gaoxin): optimize contract account
-            rw_set.insert_location(LocationAndType::Basic(tx_env.caller), RWType::ReadWrite);
-            if let TxKind::Call(to_address) = tx_env.transact_to {
-                if !tx_env.data.is_empty() {
-                    ParallelExecutionHints::insert_hints_with_contract_data(
-                        to_address,
-                        None,
-                        &tx_env.data,
-                        &mut rw_set,
-                    );
-                } else {
-                    rw_set.insert_location(LocationAndType::Basic(to_address), RWType::ReadWrite);
+        let parallel_cnt = *CPU_CORES * 2 + 1;
+        let mut hints: Vec<Mutex<Vec<TxRWSet>>> = Vec::with_capacity(parallel_cnt);
+        for _ in 0..parallel_cnt {
+            hints.push(Mutex::new(Vec::with_capacity(txs.len() / parallel_cnt + 1)));
+        }
+        fork_join_util(txs.len(), Some(parallel_cnt), |start_txs, end_txs, part| {
+            let mut rw_set_vec = hints[part].lock().unwrap();
+            let rw_set_vec = rw_set_vec.deref_mut();
+            for index in start_txs..end_txs {
+                let tx_env = &txs[index];
+                let mut rw_set = TxRWSet::default();
+                // Causing transactions that call the same contract to inevitably
+                // conflict with each other. Is this behavior reasonable?
+                // TODO(gaoxin): optimize contract account
+                rw_set.insert_location(LocationAndType::Basic(tx_env.caller), RWType::ReadWrite);
+                if let TxKind::Call(to_address) = tx_env.transact_to {
+                    if to_address != tx_env.caller {
+                        if !tx_env.data.is_empty() {
+                            ParallelExecutionHints::insert_hints_with_contract_data(
+                                to_address,
+                                None,
+                                &tx_env.data,
+                                &mut rw_set,
+                            );
+                        } else {
+                            rw_set.insert_location(
+                                LocationAndType::Basic(to_address),
+                                RWType::ReadWrite,
+                            );
+                        }
+                    }
                 }
+                rw_set_vec.push(rw_set);
             }
+        });
+        let mut txs_hint = Vec::with_capacity(txs.len());
+        for part in hints.into_iter().map(|h| h.into_inner().unwrap()) {
+            txs_hint.extend(part);
         }
 
-        ParallelExecutionHints { txs_hint: hints }
+        ParallelExecutionHints { txs_hint }
     }
 
     #[fastrace::trace]

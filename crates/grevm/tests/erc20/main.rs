@@ -31,7 +31,7 @@ fn erc20_independent() {
     let miner = common::mock_miner_account();
     state.insert(miner.0, miner.1);
     let db = InMemoryDB::new(state, bytecodes, Default::default());
-    common::compare_evm_execute(db, txs, false);
+    common::compare_evm_execute(db, txs, false, HashMap::new());
 }
 
 #[test]
@@ -59,5 +59,5 @@ fn erc20_batch_transfer() {
     }
 
     let db = InMemoryDB::new(final_state, final_bytecodes, Default::default());
-    common::compare_evm_execute(db, final_txs, true);
+    common::compare_evm_execute(db, final_txs, true, HashMap::new());
 }

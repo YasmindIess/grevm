@@ -36,6 +36,7 @@ futures = { workspace = true }
 rand = { workspace = true }
 auto_impl = { workspace = true }
 lazy_static = "1.5.0"
+dashmap.workspace = true
 
 # metrics
 metrics.workspace = true

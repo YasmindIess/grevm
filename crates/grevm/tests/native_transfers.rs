@@ -2,7 +2,9 @@ pub mod common;
 
 use crate::common::{MINER_ADDRESS, START_ADDRESS};
 use common::storage::InMemoryDB;
+use metrics_util::debugging::DebugValue;
 use revm_primitives::{alloy_primitives::U160, Address, TransactTo, TxEnv, U256};
+use std::collections::HashMap;
 
 const GIGA_GAS: u64 = 1_000_000_000;
 
@@ -10,7 +12,6 @@ const GIGA_GAS: u64 = 1_000_000_000;
 fn gigagas() {
     let block_size = (GIGA_GAS as f64 / common::TRANSFER_GAS_LIMIT as f64).ceil() as usize;
     // block_size = 10
-    //
     let accounts = common::mock_block_accounts(START_ADDRESS, block_size);
     let db = InMemoryDB::new(accounts, Default::default(), Default::default());
     // START_ADDRESS + block_size
@@ -29,7 +30,22 @@ fn gigagas() {
             }
         })
         .collect();
-    common::compare_evm_execute(db, txs, true);
+    common::compare_evm_execute(
+        db,
+        txs,
+        true,
+        [
+            ("grevm.parallel_round_calls", DebugValue::Counter(1)),
+            ("grevm.sequential_execute_calls", DebugValue::Counter(0)),
+            ("grevm.parallel_tx_cnt", DebugValue::Counter(block_size as u64)),
+            ("grevm.conflict_tx_cnt", DebugValue::Counter(0)),
+            ("grevm.unconfirmed_tx_cnt", DebugValue::Counter(0)),
+            ("grevm.reusable_tx_cnt", DebugValue::Counter(0)),
+            ("grevm.partition_num_tx_diff", DebugValue::Gauge(1.0.into())),
+        ]
+        .into_iter()
+        .collect(),
+    );
 }
 
 #[test]
@@ -51,7 +67,22 @@ fn native_transfers_independent() {
             }
         })
         .collect();
-    common::compare_evm_execute(db, txs, true);
+    common::compare_evm_execute(
+        db,
+        txs,
+        true,
+        [
+            ("grevm.parallel_round_calls", DebugValue::Counter(1)),
+            ("grevm.sequential_execute_calls", DebugValue::Counter(0)),
+            ("grevm.parallel_tx_cnt", DebugValue::Counter(block_size as u64)),
+            ("grevm.conflict_tx_cnt", DebugValue::Counter(0)),
+            ("grevm.unconfirmed_tx_cnt", DebugValue::Counter(0)),
+            ("grevm.reusable_tx_cnt", DebugValue::Counter(0)),
+            ("grevm.partition_num_tx_diff", DebugValue::Gauge(1.0.into())),
+        ]
+        .into_iter()
+        .collect(),
+    );
 }
 
 #[test]
@@ -92,7 +123,22 @@ fn native_with_same_sender() {
             }
         })
         .collect();
-    common::compare_evm_execute(db, txs, false);
+    common::compare_evm_execute(
+        db,
+        txs,
+        false,
+        [
+            ("grevm.parallel_round_calls", DebugValue::Counter(2)),
+            ("grevm.sequential_execute_calls", DebugValue::Counter(0)),
+            ("grevm.parallel_tx_cnt", DebugValue::Counter(block_size as u64)),
+            ("grevm.conflict_tx_cnt", DebugValue::Counter(24)),
+            ("grevm.unconfirmed_tx_cnt", DebugValue::Counter(71)),
+            ("grevm.reusable_tx_cnt", DebugValue::Counter(71)),
+            ("grevm.partition_num_tx_diff", DebugValue::Gauge(24.0.into())),
+        ]
+        .into_iter()
+        .collect(),
+    );
 }
 
 #[test]
@@ -117,7 +163,23 @@ fn native_with_all_related() {
             }
         })
         .collect();
-    common::compare_evm_execute(db, txs, false);
+    common::compare_evm_execute(
+        db,
+        txs,
+        false,
+        [
+            ("grevm.parallel_round_calls", DebugValue::Counter(2)),
+            ("grevm.sequential_execute_calls", DebugValue::Counter(0)),
+            ("grevm.parallel_tx_cnt", DebugValue::Counter(block_size as u64)),
+            ("grevm.conflict_tx_cnt", DebugValue::Counter(96)),
+            ("grevm.unconfirmed_tx_cnt", DebugValue::Counter(0)),
+            ("grevm.reusable_tx_cnt", DebugValue::Counter(0)),
+            ("grevm.concurrent_partition_num", DebugValue::Gauge(1.0.into())), // all transactions are related, so running in one partition
+            ("grevm.partition_num_tx_diff", DebugValue::Gauge(0.0.into())),
+        ]
+        .into_iter()
+        .collect(),
+    );
 }
 
 #[test]
@@ -152,7 +214,7 @@ fn native_with_unconfirmed_reuse() {
             }
         })
         .collect();
-    common::compare_evm_execute(db, txs, false);
+    common::compare_evm_execute(db, txs, false, HashMap::new());
 }
 
 #[test]
@@ -161,7 +223,7 @@ fn native_zero_or_one_tx() {
     let db = InMemoryDB::new(accounts, Default::default(), Default::default());
     let txs: Vec<TxEnv> = vec![];
     // empty block
-    common::compare_evm_execute(db, txs, false);
+    common::compare_evm_execute(db, txs, false, HashMap::new());
 
     // one tx
     let txs = vec![TxEnv {
@@ -175,7 +237,7 @@ fn native_zero_or_one_tx() {
     }];
     let accounts = common::mock_block_accounts(START_ADDRESS, 1);
     let db = InMemoryDB::new(accounts, Default::default(), Default::default());
-    common::compare_evm_execute(db, txs, false);
+    common::compare_evm_execute(db, txs, false, HashMap::new());
 }
 
 #[test]
@@ -202,7 +264,7 @@ fn native_loaded_not_existing_account() {
             }
         })
         .collect();
-    common::compare_evm_execute(db, txs, true);
+    common::compare_evm_execute(db, txs, true, HashMap::new());
 }
 
 #[test]
@@ -279,5 +341,20 @@ fn native_transfer_with_beneficiary() {
             ..TxEnv::default()
         },
     );
-    common::compare_evm_execute(db, txs, false);
+    common::compare_evm_execute(
+        db,
+        txs,
+        false,
+        [
+            ("grevm.parallel_round_calls", DebugValue::Counter(2)),
+            ("grevm.sequential_execute_calls", DebugValue::Counter(0)),
+            ("grevm.parallel_tx_cnt", DebugValue::Counter(block_size as u64)),
+            ("grevm.conflict_tx_cnt", DebugValue::Counter(5)),
+            ("grevm.unconfirmed_tx_cnt", DebugValue::Counter(75)),
+            ("grevm.reusable_tx_cnt", DebugValue::Counter(75)),
+            ("grevm.partition_num_tx_diff", DebugValue::Gauge(3.0.into())),
+        ]
+        .into_iter()
+        .collect(),
+    );
 }
