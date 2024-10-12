@@ -2,6 +2,9 @@ use alloy_sol_types::private::primitives::TxKind;
 use alloy_sol_types::private::Address;
 use reth_primitives::ruint::aliases::U256;
 use reth_primitives::{Bytes, B256};
+use revm_primitives::keccak256;
+use revm_primitives::ruint::aliases::U160;
+use revm_primitives::ruint::UintTryFrom;
 use revm_primitives::TxEnv;
 use smallvec::SmallVec;
 
@@ -13,6 +16,45 @@ enum RWType {
     ReadOnly,
     WriteOnly,
     ReadWrite,
+}
+
+enum ContractType {
+    UNKNOWN,
+    ERC20,
+}
+
+enum ERC20Function {
+    UNKNOWN,
+    Allowance,
+    Approve,
+    BalanceOf,
+    Decimals,
+    DecreaseAllowance,
+    IncreaseAllowance,
+    Name,
+    Symbol,
+    TotalSupply,
+    Transfer,
+    TransferFrom,
+}
+
+impl From<u32> for ERC20Function {
+    fn from(func_id: u32) -> Self {
+        match func_id {
+            0xdd62ed3e => ERC20Function::Allowance,
+            0x095ea7b3 => ERC20Function::Approve,
+            0x70a08231 => ERC20Function::BalanceOf,
+            0x313ce567 => ERC20Function::Decimals,
+            0xa457c2d7 => ERC20Function::DecreaseAllowance,
+            0x39509351 => ERC20Function::IncreaseAllowance,
+            0x06fdde03 => ERC20Function::Name,
+            0x95d89b41 => ERC20Function::Symbol,
+            0x18160ddd => ERC20Function::TotalSupply,
+            0xa9059cbb => ERC20Function::Transfer,
+            0x23b872dd => ERC20Function::TransferFrom,
+            _ => ERC20Function::UNKNOWN,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -62,20 +104,17 @@ impl ParallelExecutionHints {
                 // TODO(gaoxin): optimize contract account
                 rw_set.insert_location(LocationAndType::Basic(tx_env.caller), RWType::ReadWrite);
                 if let TxKind::Call(to_address) = tx_env.transact_to {
-                    if to_address != tx_env.caller {
-                        if !tx_env.data.is_empty() {
-                            ParallelExecutionHints::insert_hints_with_contract_data(
-                                to_address,
-                                None,
-                                &tx_env.data,
-                                rw_set,
-                            );
-                        } else {
-                            rw_set.insert_location(
-                                LocationAndType::Basic(to_address),
-                                RWType::ReadWrite,
-                            );
-                        }
+                    if !tx_env.data.is_empty() {
+                        ParallelExecutionHints::update_hints_with_contract_data(
+                            tx_env.caller,
+                            to_address,
+                            None,
+                            &tx_env.data,
+                            rw_set,
+                        );
+                    } else if to_address != tx_env.caller {
+                        rw_set
+                            .insert_location(LocationAndType::Basic(to_address), RWType::ReadWrite);
                     }
                 }
             }
@@ -84,57 +123,104 @@ impl ParallelExecutionHints {
         ParallelExecutionHints { txs_hint: hints }
     }
 
+    fn slot_from_indices<K, V>(slot: K, indices: Vec<V>) -> U256
+    where
+        U256: UintTryFrom<K>,
+        U256: UintTryFrom<V>,
+    {
+        let mut result = B256::from(U256::from(slot));
+        for index in indices {
+            let to_prepend = B256::from(U256::from(index));
+            result = keccak256([to_prepend.as_slice(), result.as_slice()].concat())
+        }
+        result.into()
+    }
+
+    fn slot_from_address(slot: u32, addresses: Vec<Address>) -> U256 {
+        let indices: Vec<U256> = addresses
+            .into_iter()
+            .map(|address| {
+                let encoded_as_u160: U160 = address.into();
+                U256::from(encoded_as_u160)
+            })
+            .collect();
+        Self::slot_from_indices(slot, indices)
+    }
+
     #[fastrace::trace]
-    fn insert_hints_with_contract_data(
+    fn update_hints_with_contract_data(
+        caller: Address,
         contract_address: Address,
         code: Option<Bytes>,
         data: &Bytes,
         tx_rw_set: &mut TxRWSet,
     ) {
-        // It should return if code is empty or data is empty
-        // TODO(gravity_richard.zhz): refactor here after preloading the code
         if code.is_none() && data.is_empty() {
-            return;
+            panic!("Unreachable error")
         }
-        // println!("code {:?} data {:?}", code, data);
         if data.len() < 4 || (data.len() - 4) % 32 != 0 {
             // Invalid tx, or tx that triggers fallback CALL
             return;
         }
         let (func_id, parameters) = Self::decode_contract_parameters(data);
-        // TODO(gravity_richard.zhz): refactor the judgement later with contract template
-        // ERC20_transfer
-        for p in parameters.iter() {
-            tx_rw_set.insert_location(
-                LocationAndType::Storage(contract_address, U256::from_be_bytes(p.0)),
-                RWType::ReadWrite,
-            );
+        match Self::get_contract_type(contract_address) {
+            ContractType::ERC20 => match ERC20Function::from(func_id) {
+                ERC20Function::Transfer => {
+                    assert_eq!(parameters.len(), 2);
+                    let to_address: [u8; 20] =
+                        parameters[0].as_slice()[12..].try_into().expect("try into failed");
+                    let to_slot = Self::slot_from_address(0, vec![Address::new(to_address)]);
+                    let from_slot = Self::slot_from_address(0, vec![caller]);
+                    tx_rw_set.insert_location(
+                        LocationAndType::Storage(contract_address, from_slot),
+                        RWType::ReadWrite,
+                    );
+                    tx_rw_set.insert_location(
+                        LocationAndType::Storage(contract_address, to_slot),
+                        RWType::ReadWrite,
+                    );
+                }
+                ERC20Function::TransferFrom => {
+                    assert_eq!(parameters.len(), 3);
+                    let from_address: [u8; 20] =
+                        parameters[0].as_slice()[12..].try_into().expect("try into failed");
+                    let from_address = Address::new(from_address);
+                    let to_address: [u8; 20] =
+                        parameters[1].as_slice()[12..].try_into().expect("try into failed");
+                    let to_address = Address::new(to_address);
+                    let from_slot = Self::slot_from_address(1, vec![from_address]);
+                    let to_slot = Self::slot_from_address(1, vec![to_address]);
+                    let allowance_slot = Self::slot_from_address(1, vec![from_address, caller]);
+                    tx_rw_set.insert_location(
+                        LocationAndType::Storage(contract_address, from_slot),
+                        RWType::ReadWrite,
+                    );
+                    tx_rw_set.insert_location(
+                        LocationAndType::Storage(contract_address, to_slot),
+                        RWType::ReadWrite,
+                    );
+                    tx_rw_set.insert_location(
+                        LocationAndType::Storage(contract_address, allowance_slot),
+                        RWType::ReadWrite,
+                    );
+                }
+                _ => {
+                    tx_rw_set.insert_location(
+                        LocationAndType::Basic(contract_address),
+                        RWType::ReadWrite,
+                    );
+                }
+            },
+            ContractType::UNKNOWN => {
+                tx_rw_set
+                    .insert_location(LocationAndType::Basic(contract_address), RWType::ReadWrite);
+            }
         }
-        // TODO(gravity_richard.zhz): just for test and delete later
-        if func_id == 0xa9059cbb {
-            assert_eq!(data.len(), 68);
-            assert_eq!(parameters.len(), 2);
-            let from_address: [u8; 20] =
-                parameters[0].as_slice()[12..].try_into().expect("try into failed");
-            let from_address = Address::new(from_address);
-            // println!("from_address {:?}", from_address);
-            tx_rw_set.insert_location(LocationAndType::Basic(from_address), RWType::ReadWrite);
-        } else if func_id == 0x23b872dd {
-            // ERC20_transfer_from
-            assert_eq!(data.len(), 100);
-            assert_eq!(parameters.len(), 3);
-            let from_address: [u8; 20] =
-                parameters[0].as_slice()[12..].try_into().expect("try into failed");
-            let from_address = Address::new(from_address);
-            let to_address: [u8; 20] =
-                parameters[1].as_slice()[12..].try_into().expect("try into failed");
-            let to_address = Address::new(to_address);
-            // println!("from_address {:?}, to_address {:?}", from_address, to_address);
-            tx_rw_set.insert_location(LocationAndType::Basic(from_address), RWType::ReadWrite);
-            tx_rw_set.insert_location(LocationAndType::Basic(to_address), RWType::ReadWrite);
-        } else {
-            tx_rw_set.insert_location(LocationAndType::Basic(contract_address), RWType::ReadWrite);
-        }
+    }
+
+    fn get_contract_type(contract_address: Address) -> ContractType {
+        // TODO(gaoxin): Parse the correct contract type to determined how to handle call data
+        ContractType::ERC20
     }
 
     fn decode_contract_parameters(data: &Bytes) -> (u32, Vec<B256>) {
@@ -145,13 +231,11 @@ impl ParallelExecutionHints {
         }
 
         let func_id = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-        // println!("func_id {:?}", func_id);
 
         for chunk in data[4..].chunks(32) {
             let array: [u8; 32] = chunk.try_into().expect("Slice has wrong length!");
             parameters.push(B256::from(array));
         }
-        // println!("parameters {:?}", parameters);
 
         (func_id, parameters)
     }
