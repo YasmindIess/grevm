@@ -10,13 +10,25 @@ use std::collections::HashMap;
 
 use crate::common::START_ADDRESS;
 use crate::erc20::erc20_contract::ERC20Token;
-use crate::erc20::{generate_cluster, TransactionModeType, TxnBatchConfig, GAS_LIMIT};
+use crate::erc20::{
+    generate_cluster, generate_independent_data, TransactionModeType, TxnBatchConfig, GAS_LIMIT,
+};
 
 #[path = "../common/mod.rs"]
 pub mod common;
 
 #[path = "./mod.rs"]
 pub mod erc20;
+
+const GIGA_GAS: u64 = 1_000_000_000;
+
+#[test]
+fn gigagas() {
+    let pevm_gas_limit: u64 = 26_938;
+    let block_size = (GIGA_GAS as f64 / pevm_gas_limit as f64).ceil() as usize;
+    let (db, txs) = generate_independent_data(block_size);
+    common::compare_evm_execute(db, txs, true, HashMap::new());
+}
 
 #[test]
 fn erc20_hints_test() {

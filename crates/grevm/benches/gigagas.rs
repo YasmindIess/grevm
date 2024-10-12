@@ -4,17 +4,22 @@ use std::sync::Arc;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use fastrace::collector::Config;
+use fastrace::prelude::*;
+use fastrace_jaeger::JaegerReporter;
+use revm_primitives::alloy_primitives::U160;
+use revm_primitives::{Address, Env, SpecId, TransactTo, TxEnv, U256};
+
+use common::storage::InMemoryDB;
+use reth_chainspec::NamedChain;
+use reth_grevm::GrevmScheduler;
+
+use crate::erc20::generate_independent_data;
 
 #[path = "../tests/common/mod.rs"]
 pub mod common;
 
-use common::storage::InMemoryDB;
-use fastrace::prelude::*;
-use fastrace_jaeger::JaegerReporter;
-use reth_chainspec::NamedChain;
-use reth_grevm::GrevmScheduler;
-use revm_primitives::alloy_primitives::U160;
-use revm_primitives::{Address, Env, SpecId, TransactTo, TxEnv, U256};
+#[path = "../tests/erc20/mod.rs"]
+pub mod erc20;
 
 const GIGA_GAS: u64 = 1_000_000_000;
 
@@ -104,5 +109,13 @@ fn benchmark_gigagas(c: &mut Criterion) {
     fastrace::flush();
 }
 
-criterion_group!(benches, benchmark_gigagas);
+fn benchmark_erc20(c: &mut Criterion) {
+    let pevm_gas_limit: u64 = 26_938;
+    let block_size = (GIGA_GAS as f64 / pevm_gas_limit as f64).ceil() as usize;
+    let (db, txs) = generate_independent_data(block_size);
+
+    bench(c, "Independent ERC20", db, txs);
+}
+
+criterion_group!(benches, benchmark_gigagas, benchmark_erc20);
 criterion_main!(benches);
