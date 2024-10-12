@@ -133,11 +133,13 @@ pub fn generate_erc20_batch(
     txns
 }
 
+/// Return a tuple of (state, bytecodes, eoa_address, sca_address)
 pub fn generate_cluster(
-    txn_batch_config: &TxnBatchConfig,
-) -> (HashMap<Address, PlainAccount>, HashMap<B256, Bytecode>, Vec<TxEnv>) {
+    num_eoa: usize,
+    num_sca: usize,
+) -> (HashMap<Address, PlainAccount>, HashMap<B256, Bytecode>, Vec<Address>, Vec<Address>) {
     let mut state = HashMap::new();
-    let eoa_addresses: Vec<Address> = generate_addresses(txn_batch_config.num_eoa);
+    let eoa_addresses: Vec<Address> = generate_addresses(num_eoa);
 
     for person in eoa_addresses.iter() {
         state.insert(
@@ -155,65 +157,33 @@ pub fn generate_cluster(
     let mut bytecodes = HashMap::new();
     let mut erc20_sca: Vec<PlainAccount> = Vec::new();
     let mut erc20_sca_address: Vec<Address> = Vec::new();
-    for i in 0..txn_batch_config.num_eoa {
+    for _ in 0..num_sca {
         let gld_address = Address::new(rand::random());
         erc20_sca_address.push(gld_address);
 
-        let gld_account =
+        let mut gld_account =
             ERC20Token::new("Gold Token", "GLD", 18, 222_222_000_000_000_000_000_000u128)
                 .add_balances(&eoa_addresses, uint!(1_000_000_000_000_000_000_U256))
                 .build();
         erc20_sca.push(gld_account.clone());
-        bytecodes.insert(gld_account.info.code_hash, gld_account.info.code.clone().unwrap());
+        bytecodes.insert(gld_account.info.code_hash, gld_account.info.code.take().unwrap());
         state.insert(gld_address, gld_account);
     }
 
-    let mut txs = generate_erc20_batch(
+    (state, bytecodes, eoa_addresses, erc20_sca_address)
+}
+
+pub fn generate_cluster_and_txs(
+    txn_batch_config: &TxnBatchConfig,
+) -> (HashMap<Address, PlainAccount>, HashMap<B256, Bytecode>, Vec<TxEnv>) {
+    let (state, bytecodes, eoa_addresses, erc20_sca_address) =
+        generate_cluster(txn_batch_config.num_eoa, txn_batch_config.num_sca);
+    let txs = generate_erc20_batch(
         eoa_addresses,
         erc20_sca_address,
         txn_batch_config.num_txns_per_address,
         txn_batch_config.transaction_call_data_type,
         txn_batch_config.transaction_mode_type,
     );
-
     (state, bytecodes, txs)
-}
-
-pub fn generate_independent_data(block_size: usize) -> (InMemoryDB, Vec<TxEnv>) {
-    let db_latency_us = std::env::var_os("DB_LATENCY_US")
-        .map(|s| s.to_string_lossy().parse().unwrap())
-        .unwrap_or(0);
-
-    let pevm_gas_limit: u64 = 26_938;
-    let mut accounts = mock_block_accounts(START_ADDRESS + 1, block_size);
-    let eoa_accounts: Vec<Address> = accounts.keys().cloned().collect();
-    let mut bytecodes = HashMap::new();
-    // START_ADDRESS as contract address
-    let contract_address = Address::from(U160::from(START_ADDRESS));
-    let galxe_account =
-        ERC20Token::new("Galxe Token", "G", 18, 222_222_000_000_000_000_000_000u128)
-            .add_balances(&eoa_accounts, uint!(1_000_000_000_000_000_000_U256))
-            .build();
-    bytecodes.insert(galxe_account.info.code_hash, galxe_account.info.code.clone().unwrap());
-    accounts.insert(contract_address, galxe_account);
-    let mut db = InMemoryDB::new(accounts, bytecodes, Default::default());
-    db.latency_us = db_latency_us;
-
-    let txs: Vec<TxEnv> = (1..=block_size)
-        .map(|i| {
-            let address = Address::from(U160::from(START_ADDRESS + i));
-            let call_data = ERC20Token::transfer(address, U256::from(900));
-            TxEnv {
-                caller: address,
-                transact_to: TransactTo::Call(contract_address),
-                value: U256::from(0),
-                gas_limit: GAS_LIMIT,
-                gas_price: U256::from(1),
-                nonce: Some(1),
-                data: call_data,
-                ..TxEnv::default()
-            }
-        })
-        .collect();
-    (db, txs)
 }

@@ -72,6 +72,7 @@ impl<DB> SchedulerDB<DB> {
     /// This action will create final post state and all reverts so that
     /// we at any time revert state of bundle to the state before transition
     /// is applied.
+    #[fastrace::trace]
     pub(crate) fn merge_transitions(&mut self, retention: BundleRetention) {
         if let Some(transition_state) = self.transition_state.as_mut().map(TransitionState::take) {
             self.bundle_state.apply_transitions_and_create_reverts(transition_state, retention);
@@ -124,7 +125,7 @@ fn into_cache_account(account: Option<AccountInfo>) -> CacheAccount {
     match account {
         None => CacheAccount::new_loaded_not_existing(),
         Some(acc) if acc.is_empty() => CacheAccount::new_loaded_empty_eip161(HashMap::new()),
-        Some(acc) => CacheAccount::new_loaded(acc.clone(), HashMap::new()),
+        Some(acc) => CacheAccount::new_loaded(acc, HashMap::new()),
     }
 }
 

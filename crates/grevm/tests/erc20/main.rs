@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use crate::common::START_ADDRESS;
 use crate::erc20::erc20_contract::ERC20Token;
 use crate::erc20::{
-    generate_cluster, generate_independent_data, TransactionModeType, TxnBatchConfig, GAS_LIMIT,
+    generate_cluster, generate_cluster_and_txs, TransactionModeType, TxnBatchConfig, GAS_LIMIT,
 };
 
 #[path = "../common/mod.rs"]
@@ -24,10 +24,40 @@ const GIGA_GAS: u64 = 1_000_000_000;
 
 #[test]
 fn gigagas() {
-    let pevm_gas_limit: u64 = 26_938;
-    let block_size = (GIGA_GAS as f64 / pevm_gas_limit as f64).ceil() as usize;
-    let (db, txs) = generate_independent_data(block_size);
-    common::compare_evm_execute(db, txs, true, HashMap::new());
+    const PEVM_GAS_LIMIT: u64 = 26_938;
+    let block_size = (GIGA_GAS as f64 / PEVM_GAS_LIMIT as f64).ceil() as usize;
+    let (mut state, bytecodes, eoa, sca) = generate_cluster(block_size, 1);
+    let miner = common::mock_miner_account();
+    state.insert(miner.0, miner.1);
+    let mut txs = Vec::with_capacity(block_size);
+    let sca = sca[0];
+    for addr in eoa {
+        let tx = TxEnv {
+            caller: addr,
+            transact_to: TransactTo::Call(sca),
+            value: U256::from(0),
+            gas_limit: GAS_LIMIT,
+            gas_price: U256::from(1),
+            nonce: Some(0),
+            data: ERC20Token::transfer(addr, U256::from(900)),
+            ..TxEnv::default()
+        };
+        txs.push(tx);
+    }
+    let db = InMemoryDB::new(state, bytecodes, Default::default());
+    common::compare_evm_execute(
+        db,
+        txs,
+        true,
+        [
+            ("grevm.parallel_round_calls", DebugValue::Counter(1)),
+            ("grevm.sequential_execute_calls", DebugValue::Counter(0)),
+            ("grevm.parallel_tx_cnt", DebugValue::Counter(block_size as u64)),
+            ("grevm.conflict_tx_cnt", DebugValue::Counter(0)),
+        ]
+        .into_iter()
+        .collect(),
+    );
 }
 
 #[test]
@@ -120,18 +150,29 @@ fn erc20_independent() {
         erc20::TransactionCallDataType::Transfer,
         TransactionModeType::SameCaller,
     );
-    let (mut state, bytecodes, txs) = generate_cluster(&batch_txn_config);
+    let (mut state, bytecodes, txs) = generate_cluster_and_txs(&batch_txn_config);
     let miner = common::mock_miner_account();
     state.insert(miner.0, miner.1);
     let db = InMemoryDB::new(state, bytecodes, Default::default());
-    common::compare_evm_execute(db, txs, false, HashMap::new());
+    common::compare_evm_execute(
+        db,
+        txs,
+        true,
+        [
+            ("grevm.parallel_round_calls", DebugValue::Counter(1)),
+            ("grevm.sequential_execute_calls", DebugValue::Counter(0)),
+            ("grevm.conflict_tx_cnt", DebugValue::Counter(0)),
+        ]
+        .into_iter()
+        .collect(),
+    );
 }
 
 #[test]
 fn erc20_batch_transfer() {
-    const NUM_SCA: usize = 10;
+    const NUM_SCA: usize = 3;
     const NUM_EOA: usize = 10;
-    const NUM_TXNS_PER_ADDRESS: usize = 2;
+    const NUM_TXNS_PER_ADDRESS: usize = 20;
 
     let batch_txn_config = TxnBatchConfig::new(
         NUM_EOA,
@@ -145,12 +186,22 @@ fn erc20_batch_transfer() {
     let mut final_bytecodes = HashMap::default();
     let mut final_txs = Vec::<TxEnv>::new();
     for _ in 0..1 {
-        let (state, bytecodes, txs) = generate_cluster(&batch_txn_config);
+        let (state, bytecodes, txs) = generate_cluster_and_txs(&batch_txn_config);
         final_state.extend(state);
         final_bytecodes.extend(bytecodes);
         final_txs.extend(txs);
     }
 
     let db = InMemoryDB::new(final_state, final_bytecodes, Default::default());
-    common::compare_evm_execute(db, final_txs, true, HashMap::new());
+    common::compare_evm_execute(
+        db,
+        final_txs,
+        true,
+        [
+            ("grevm.parallel_round_calls", DebugValue::Counter(1)),
+            ("grevm.conflict_tx_cnt", DebugValue::Counter(0)),
+        ]
+        .into_iter()
+        .collect(),
+    );
 }

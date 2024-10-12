@@ -473,7 +473,9 @@ where
             .collect();
 
         // MUST drop the `PartitionExecutor::scheduler_db` before get mut
+        let span = Span::enter_with_local_parent("clear partition_executors");
         self.partition_executors.clear();
+        std::mem::drop(span);
         let database = Arc::get_mut(&mut self.database).unwrap();
 
         Self::merge_not_modified_state(&mut database.cache, partition_state);
