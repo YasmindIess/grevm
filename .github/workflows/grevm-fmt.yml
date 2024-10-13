@@ -2,7 +2,7 @@ name: Grevm Format Check
 
 on:
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "open_source" ]
   merge_group:
     types: [checks_requested]
 
@@ -25,4 +25,4 @@ jobs:
         run: rustup component add rustfmt
 
       - name: Run cargo fmt
-        run: cargo fmt -p reth-grevm --check
+        run: cargo fmt --check

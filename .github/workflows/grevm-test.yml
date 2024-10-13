@@ -2,7 +2,7 @@ name: Grevm Tests
 
 on:
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "open_source" ]
   merge_group:
     types: [checks_requested]
 
@@ -24,4 +24,4 @@ jobs:
           override: true
 
       - name: Run tests
-        run: cargo test -p reth-grevm
+        run: cargo test

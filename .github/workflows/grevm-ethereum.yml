@@ -2,7 +2,7 @@ name: Grevm Ethereum
 
 on:
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "open_source" ]
   merge_group:
     types: [checks_requested]
 
@@ -25,7 +25,7 @@ jobs:
 
       - name: Clone ethereum/tests repository
         run: |
-          git clone https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/ethereum/tests.git crates/grevm/tests/ethereum/tests
+          git clone https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/ethereum/tests.git tests/ethereum/tests
 
       - name: Run tests
-        run: cargo test --package reth-grevm --test ethereum
+        run: cargo test --test ethereum
