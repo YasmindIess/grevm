@@ -9,7 +9,7 @@ use reth_revm::{DatabaseCommit, EvmBuilder, StateBuilder};
 use revm_primitives::alloy_primitives::{U160, U256};
 use revm_primitives::db::DatabaseRef;
 use revm_primitives::{
-    AccountInfo, Address, EVMError, Env, ExecutionResult, SpecId, TxEnv, KECCAK_EMPTY,
+    uint, AccountInfo, Address, EVMError, Env, ExecutionResult, SpecId, TxEnv, KECCAK_EMPTY,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
@@ -73,7 +73,7 @@ pub fn mock_eoa_account(idx: usize) -> (Address, PlainAccount) {
     let address = Address::from(U160::from(idx));
     let account = PlainAccount {
         info: AccountInfo {
-            balance: U256::from(500_000_000),
+            balance: uint!(1_000_000_000_000_000_000_U256),
             nonce: 1,
             code_hash: KECCAK_EMPTY,
             code: None,

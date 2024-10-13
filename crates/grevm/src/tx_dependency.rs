@@ -160,18 +160,21 @@ impl TxDependency {
         // Separate processing of groups with a weight of 1
         // Because there is only one transaction in these groups,
         // processing them separately can greatly optimize performance.
-        if let Some(groups) = weighted_group.remove(&RAW_TRANSFER_WEIGHT) {
-            fork_join_util(groups.len(), Some(num_partitions), |start_pos, end_pos, part| {
-                #[allow(invalid_reference_casting)]
-                let mut partition = unsafe {
-                    &mut *(&partitioned_group[part] as *const BTreeSet<TxId> as *mut BTreeSet<TxId>)
-                };
-                for pos in start_pos..end_pos {
-                    for txid in groups[pos].iter() {
-                        partition.insert(*txid);
+        if weighted_group.len() == 1 {
+            if let Some(groups) = weighted_group.remove(&RAW_TRANSFER_WEIGHT) {
+                fork_join_util(groups.len(), Some(num_partitions), |start_pos, end_pos, part| {
+                    #[allow(invalid_reference_casting)]
+                    let mut partition = unsafe {
+                        &mut *(&partitioned_group[part] as *const BTreeSet<TxId>
+                            as *mut BTreeSet<TxId>)
+                    };
+                    for pos in start_pos..end_pos {
+                        for txid in groups[pos].iter() {
+                            partition.insert(*txid);
+                        }
                     }
-                }
-            });
+                });
+            }
         }
         for index in 0..num_partitions {
             partition_weight

@@ -20,7 +20,8 @@ use crate::partition::{
 use crate::storage::SchedulerDB;
 use crate::tx_dependency::{DependentTxsVec, TxDependency};
 use crate::{
-    GrevmError, LocationAndType, PartitionId, TxId, CPU_CORES, GREVM_RUNTIME, MAX_NUM_ROUND,
+    fork_join_util, GrevmError, LocationAndType, PartitionId, TxId, CPU_CORES, GREVM_RUNTIME,
+    MAX_NUM_ROUND,
 };
 
 use metrics::{counter, gauge, histogram};
@@ -236,21 +237,21 @@ where
         self.tx_dependencies.clean_dependency();
     }
 
-    fn generate_partition_pre_context(
-        &mut self,
-        partition_id: PartitionId,
-    ) -> Option<PreRoundContext> {
-        let mut pre_unconfirmed_txs = BTreeMap::new();
-        for txid in &self.partitioned_txs[partition_id] {
-            if let Some(ctx) = self.pre_unconfirmed_txs.remove(txid) {
-                pre_unconfirmed_txs.insert(*txid, ctx);
+    fn generate_partition_pre_context(&mut self) {
+        fork_join_util(self.num_partitions, Some(self.num_partitions), |_, _, part| {
+            let mut pre_unconfirmed_txs = HashMap::new();
+            for txid in &self.partitioned_txs[part] {
+                if let Some(ctx) = self.pre_unconfirmed_txs.get(txid) {
+                    pre_unconfirmed_txs.insert(*txid, ctx.clone());
+                }
             }
-        }
-        if pre_unconfirmed_txs.is_empty() {
-            None
-        } else {
-            Some(PreRoundContext { pre_unconfirmed_txs })
-        }
+            if !pre_unconfirmed_txs.is_empty() {
+                let mut executor = self.partition_executors[part].write().unwrap();
+                executor.set_pre_round_ctx(Some(PreRoundContext { pre_unconfirmed_txs }));
+            }
+        });
+        // released pre_unconfirmed_txs
+        self.pre_unconfirmed_txs.clear();
     }
 
     #[fastrace::trace]
@@ -266,11 +267,9 @@ where
                 self.txs.clone(),
                 self.partitioned_txs[partition_id].clone(),
             );
-            executor.set_pre_round_ctx(self.generate_partition_pre_context(partition_id));
             self.partition_executors.push(Arc::new(RwLock::new(executor)));
         }
-        // has released pre_unconfirmed_txs
-        assert!(self.pre_unconfirmed_txs.is_empty());
+        self.generate_partition_pre_context();
 
         GREVM_RUNTIME.block_on(async {
             let mut tasks = vec![];
@@ -362,7 +361,7 @@ where
                         let mut updated_dependencies = BTreeSet::new();
                         for location in rs {
                             if let Some(written_txs) = merged_write_set.get(location) {
-                                for previous_txid in written_txs.range(..txid) {
+                                if let Some(previous_txid) = written_txs.range(..txid).next_back() {
                                     // update dependencies: previous_txid <- txid
                                     updated_dependencies.insert(*previous_txid);
                                     if !conflict
@@ -388,7 +387,7 @@ where
             }
             futures::future::join_all(tasks).await;
         });
-        std::mem::drop(span);
+        drop(span);
         // find the continuous min txid
         let span = Span::enter_with_local_parent("find the continuous min txid");
         let mut unconfirmed_txs = BTreeMap::new();
@@ -450,7 +449,7 @@ where
             }
         }
 
-        std::mem::drop(span);
+        drop(span);
         self.pre_unconfirmed_txs = unconfirmed_txs.split_off(&self.num_finality_txs);
         // Now `unconfirmed_txs` only contains the txs that are finality in this round
         let finality_txs = unconfirmed_txs;
@@ -475,7 +474,7 @@ where
         // MUST drop the `PartitionExecutor::scheduler_db` before get mut
         let span = Span::enter_with_local_parent("clear partition_executors");
         self.partition_executors.clear();
-        std::mem::drop(span);
+        drop(span);
         let database = Arc::get_mut(&mut self.database).unwrap();
 
         Self::merge_not_modified_state(&mut database.cache, partition_state);
@@ -495,7 +494,7 @@ where
         database
             .increment_balances(vec![(self.coinbase, rewards)])
             .map_err(|err| GrevmError::EvmError(EVMError::Database(err)))?;
-        std::mem::drop(span);
+        drop(span);
 
         self.metrics.validate_time.increment(start.elapsed().as_nanos() as u64);
         Ok(())

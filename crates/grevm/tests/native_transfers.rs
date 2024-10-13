@@ -133,7 +133,7 @@ fn native_with_same_sender() {
             ("grevm.conflict_tx_cnt", DebugValue::Counter(24)),
             ("grevm.unconfirmed_tx_cnt", DebugValue::Counter(71)),
             ("grevm.reusable_tx_cnt", DebugValue::Counter(71)),
-            ("grevm.partition_num_tx_diff", DebugValue::Gauge(24.0.into())),
+            ("grevm.partition_num_tx_diff", DebugValue::Gauge(21.0.into())),
         ]
         .into_iter()
         .collect(),
@@ -351,7 +351,7 @@ fn native_transfer_with_beneficiary() {
             ("grevm.conflict_tx_cnt", DebugValue::Counter(5)),
             ("grevm.unconfirmed_tx_cnt", DebugValue::Counter(75)),
             ("grevm.reusable_tx_cnt", DebugValue::Counter(75)),
-            ("grevm.partition_num_tx_diff", DebugValue::Gauge(3.0.into())),
+            ("grevm.partition_num_tx_diff", DebugValue::Gauge(1.0.into())),
         ]
         .into_iter()
         .collect(),

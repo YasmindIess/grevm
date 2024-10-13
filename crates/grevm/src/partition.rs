@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -33,6 +33,7 @@ impl<E: Ord> OrderedVectorExt<E> for Vec<E> {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct PreUnconfirmedContext {
     pub read_set: HashSet<LocationAndType>,
     pub write_set: HashSet<LocationAndType>,
@@ -43,7 +44,7 @@ pub(crate) struct PreUnconfirmedContext {
 /// which can accelerate the execution of the current round
 #[derive(Default)]
 pub(crate) struct PreRoundContext {
-    pub pre_unconfirmed_txs: BTreeMap<TxId, PreUnconfirmedContext>,
+    pub pre_unconfirmed_txs: HashMap<TxId, PreUnconfirmedContext>,
 }
 
 impl PreRoundContext {
@@ -62,7 +63,7 @@ where
     spec_id: SpecId,
     env: Env,
     coinbase: Address,
-    partition_id: PartitionId,
+    pub partition_id: PartitionId,
 
     pub partition_db: PartitionDB<DB>,
 
