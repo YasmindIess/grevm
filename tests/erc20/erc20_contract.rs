@@ -1,6 +1,7 @@
 use crate::common::storage::{from_address, from_indices, from_short_string, StorageBuilder};
 use lazy_static::lazy_static;
 use revm::db::PlainAccount;
+use revm::interpreter::analysis::to_analysed;
 use revm::primitives::hex::FromHex;
 use revm::primitives::ruint::UintTryFrom;
 use revm::primitives::{fixed_bytes, AccountInfo, Address, Bytecode, Bytes, B256, U256};
@@ -81,6 +82,7 @@ impl ERC20Token {
     pub fn build(&self) -> PlainAccount {
         let hex = ERC20_TOKEN.trim();
         let bytecode = Bytecode::new_raw(Bytes::from_hex(hex).unwrap());
+        let bytecode = to_analysed(bytecode);
 
         let mut store = StorageBuilder::new();
         store.set(0, 0); // mapping

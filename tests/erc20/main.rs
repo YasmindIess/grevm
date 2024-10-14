@@ -22,7 +22,7 @@ pub mod erc20;
 const GIGA_GAS: u64 = 1_000_000_000;
 
 #[test]
-fn gigagas() {
+fn erc20_gigagas() {
     const PEVM_GAS_LIMIT: u64 = 26_938;
     let block_size = (GIGA_GAS as f64 / PEVM_GAS_LIMIT as f64).ceil() as usize;
     let (mut state, bytecodes, eoa, sca) = generate_cluster(block_size, 1);

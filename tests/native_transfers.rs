@@ -11,7 +11,7 @@ use std::collections::HashMap;
 const GIGA_GAS: u64 = 1_000_000_000;
 
 #[test]
-fn gigagas() {
+fn native_gigagas() {
     let block_size = (GIGA_GAS as f64 / common::TRANSFER_GAS_LIMIT as f64).ceil() as usize;
     let accounts = common::mock_block_accounts(START_ADDRESS, block_size);
     let db = InMemoryDB::new(accounts, Default::default(), Default::default());
