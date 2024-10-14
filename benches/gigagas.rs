@@ -21,6 +21,9 @@ pub mod erc20;
 
 const GIGA_GAS: u64 = 1_000_000_000;
 
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 fn bench(c: &mut Criterion, name: &str, db: InMemoryDB, txs: Vec<TxEnv>) {
     let mut env = Env::default();
     env.cfg.chain_id = NamedChain::Mainnet.into();
