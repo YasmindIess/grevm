@@ -34,6 +34,7 @@ rayon = "1.10.0"
 revme = "0.10.3"
 fastrace = { version = "0.7", features = ["enable"] }
 fastrace-jaeger = "0.7"
+tikv-jemallocator = "0.5.0"
 
 [lints]
 rust.missing_debug_implementations = "warn"
