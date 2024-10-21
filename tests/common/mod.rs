@@ -1,3 +1,4 @@
+pub mod compat;
 mod execute;
 pub mod storage;
 
