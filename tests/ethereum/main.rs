@@ -5,29 +5,27 @@
 // Nevertheless, they are important:
 // - REVM doesn't test very tightly (not matching on expected failures, skipping tests, etc.).
 // - We must use a REVM fork (for distinguishing explicit & implicit reads, etc.).
-// - We use custom handlers (for lazy-updating the beneficiary account, etc.) that require "re-testing".
+// - We use custom handlers (for lazy-updating the beneficiary account, etc.) that require
+//   "re-testing".
 // - Help outline the minimal state commitment logic for pevm.
 
 use crate::common::storage::InMemoryDB;
 use alloy_chains::NamedChain;
 use grevm::{GrevmError, GrevmScheduler};
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
-use revm::db::PlainAccount;
-use revm::primitives::ruint::ParseError;
-use revm::primitives::{
-    calc_excess_blob_gas, AccountInfo, BlobExcessGasAndPrice, BlockEnv, Bytecode, CfgEnv,
-    Env as RevmEnv, TransactTo, TxEnv, KECCAK_EMPTY,
-};
-use revme::cmd::statetest::models::{
-    Env, SpecName, TestSuite, TestUnit, TransactionParts, TxPartIndices,
+use revm::{
+    db::PlainAccount,
+    primitives::{
+        calc_excess_blob_gas, ruint::ParseError, AccountInfo, BlobExcessGasAndPrice, BlockEnv,
+        Bytecode, CfgEnv, Env as RevmEnv, TransactTo, TxEnv, KECCAK_EMPTY,
+    },
 };
 use revme::cmd::statetest::{
     merkle_trie::{log_rlp_hash, state_merkle_trie_root},
+    models::{Env, SpecName, TestSuite, TestUnit, TransactionParts, TxPartIndices},
     utils::recover_address,
 };
-use std::collections::HashMap;
-use std::fs;
-use std::path::Path;
+use std::{collections::HashMap, fs, path::Path};
 use walkdir::{DirEntry, WalkDir};
 
 #[path = "../common/mod.rs"]

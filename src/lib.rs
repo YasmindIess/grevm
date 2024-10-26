@@ -12,12 +12,16 @@
 //! - `tx_dependency`: Handles transaction dependencies.
 
 use lazy_static::lazy_static;
-use revm::primitives::{Address, EVMError, ExecutionResult, U256};
-use revm::TransitionAccount;
-use std::cmp::min;
-use std::fmt::{Display, Formatter};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread;
+use revm::{
+    primitives::{Address, EVMError, ExecutionResult, U256},
+    TransitionAccount,
+};
+use std::{
+    cmp::min,
+    fmt::{Display, Formatter},
+    sync::atomic::{AtomicUsize, Ordering},
+    thread,
+};
 use tokio::runtime::{Builder, Runtime};
 mod hint;
 mod partition;
@@ -141,7 +145,8 @@ pub(crate) struct ResultAndTransition {
 ///
 /// * `num_elements` - The total number of elements to process.
 /// * `num_partitions` - Optional number of partitions to divide the work into.
-/// * `f` - A closure that takes three arguments: the start index, the end index, and the partition index.
+/// * `f` - A closure that takes three arguments: the start index, the end index, and the partition
+///   index.
 ///
 /// # Example
 ///

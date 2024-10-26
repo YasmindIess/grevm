@@ -1,6 +1,7 @@
-use revm::primitives::alloy_primitives::U160;
-use revm::primitives::ruint::UintTryFrom;
-use revm::primitives::{keccak256, Address, Bytes, TxEnv, TxKind, B256, U256};
+use revm::primitives::{
+    alloy_primitives::U160, keccak256, ruint::UintTryFrom, Address, Bytes, TxEnv, TxKind, B256,
+    U256,
+};
 use std::sync::Arc;
 
 use crate::{fork_join_util, LocationAndType, SharedTxStates, TxState};
@@ -86,13 +87,16 @@ impl ParallelExecutionHints {
         Self { tx_states }
     }
 
-    /// Obtain a mutable reference to shared transaction states, and parse execution hints for each transaction.
-    /// Although fork_join_util executes concurrently, transactions between each partition do not overlap.
-    /// This means each partition can independently update its assigned transactions.
-    /// `self.tx_states` is immutable, and can only be converted to mutable through unsafe code.
-    /// An alternative approach is to declare `self.tx_states` as `Arc<Vec<Mutex<TxState>>>`, allowing mutable access via `self.tx_states[index].lock().unwrap()`.
-    /// However, this would introduce locking overhead and impact performance.
-    /// The primary consideration is that developers are aware there are no conflicts between transactions, making the `Mutex` approach unnecessarily verbose and cumbersome.
+    /// Obtain a mutable reference to shared transaction states, and parse execution hints for each
+    /// transaction. Although fork_join_util executes concurrently, transactions between each
+    /// partition do not overlap. This means each partition can independently update its
+    /// assigned transactions. `self.tx_states` is immutable, and can only be converted to
+    /// mutable through unsafe code. An alternative approach is to declare `self.tx_states` as
+    /// `Arc<Vec<Mutex<TxState>>>`, allowing mutable access via
+    /// `self.tx_states[index].lock().unwrap()`. However, this would introduce locking overhead
+    /// and impact performance. The primary consideration is that developers are aware there are
+    /// no conflicts between transactions, making the `Mutex` approach unnecessarily verbose and
+    /// cumbersome.
     #[fastrace::trace]
     pub(crate) fn parse_hints(&self, txs: Arc<Vec<TxEnv>>) {
         // Utilize fork-join utility to process transactions in parallel
@@ -132,8 +136,8 @@ impl ParallelExecutionHints {
         });
     }
 
-    /// This function computes the storage slot using the provided slot number and a vector of indices.
-    /// It utilizes the keccak256 hash function to derive the final storage slot value.
+    /// This function computes the storage slot using the provided slot number and a vector of
+    /// indices. It utilizes the keccak256 hash function to derive the final storage slot value.
     ///
     /// # Type Parameters
     ///
@@ -151,14 +155,16 @@ impl ParallelExecutionHints {
     ///
     /// # ABI Standards
     ///
-    /// This function adheres to the ABI (Application Binary Interface) standards for Ethereum Virtual Machine (EVM).
-    /// For more information on ABI standards, you can refer to the following resources:
+    /// This function adheres to the ABI (Application Binary Interface) standards for Ethereum
+    /// Virtual Machine (EVM). For more information on ABI standards, you can refer to the
+    /// following resources:
     ///
     /// * [Ethereum Contract ABI Specification](https://docs.soliditylang.org/en/latest/abi-spec.html)
     /// * [Ethereum Yellow Paper](https://ethereum.github.io/yellowpaper/paper.pdf)
     /// * [EIP-20: ERC-20 Token Standard](https://eips.ethereum.org/EIPS/eip-20)
     ///
-    /// These resources provide detailed information on how data is encoded and decoded in the EVM, which is essential for understanding how storage slots are calculated.
+    /// These resources provide detailed information on how data is encoded and decoded in the EVM,
+    /// which is essential for understanding how storage slots are calculated.
     fn slot_from_indices<K, V>(slot: K, indices: Vec<V>) -> U256
     where
         U256: UintTryFrom<K>,

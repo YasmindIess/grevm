@@ -1,24 +1,28 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::ops::DerefMut;
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    ops::DerefMut,
+    sync::{Arc, RwLock},
+    time::{Duration, Instant},
+};
 
-use crate::hint::ParallelExecutionHints;
-use crate::partition::PartitionExecutor;
-use crate::storage::{LazyUpdateValue, SchedulerDB};
-use crate::tx_dependency::{DependentTxsVec, TxDependency};
 use crate::{
-    fork_join_util, GrevmError, LocationAndType, ResultAndTransition, TransactionStatus, TxId,
-    CPU_CORES, GREVM_RUNTIME, MAX_NUM_ROUND,
+    fork_join_util,
+    hint::ParallelExecutionHints,
+    partition::PartitionExecutor,
+    storage::{LazyUpdateValue, SchedulerDB},
+    tx_dependency::{DependentTxsVec, TxDependency},
+    GrevmError, LocationAndType, ResultAndTransition, TransactionStatus, TxId, CPU_CORES,
+    GREVM_RUNTIME, MAX_NUM_ROUND,
 };
 
 use metrics::{counter, gauge};
-use revm::db::states::bundle_state::BundleRetention;
-use revm::db::BundleState;
-use revm::primitives::{
-    AccountInfo, Address, Bytecode, EVMError, Env, ExecutionResult, SpecId, TxEnv, B256, U256,
+use revm::{
+    db::{states::bundle_state::BundleRetention, BundleState},
+    primitives::{
+        AccountInfo, Address, Bytecode, EVMError, Env, ExecutionResult, SpecId, TxEnv, B256, U256,
+    },
+    CacheState, DatabaseRef, EvmBuilder,
 };
-use revm::{CacheState, DatabaseRef, EvmBuilder};
 use tracing::info;
 
 struct ExecuteMetrics {
@@ -107,7 +111,8 @@ pub struct ExecuteOutput {
 pub(crate) type LocationSet = HashSet<LocationAndType>;
 
 /// The state of a transaction.
-/// Contains the read and write sets of the transaction, as well as the result of executing the transaction.
+/// Contains the read and write sets of the transaction, as well as the result of executing the
+/// transaction.
 #[derive(Clone)]
 pub(crate) struct TxState {
     pub tx_status: TransactionStatus,
@@ -313,8 +318,8 @@ where
         let mut merged_write_set: HashMap<LocationAndType, BTreeSet<TxId>> = HashMap::new();
         let mut end_skip_id = self.num_finality_txs;
         for txid in self.num_finality_txs..self.tx_states.len() {
-            if self.tx_states[txid].tx_status == TransactionStatus::SkipValidation
-                && end_skip_id == txid
+            if self.tx_states[txid].tx_status == TransactionStatus::SkipValidation &&
+                end_skip_id == txid
             {
                 end_skip_id += 1;
             } else {
@@ -335,8 +340,8 @@ where
 
     /// When validating the transaction status, the dependency relationship was updated.
     /// But there are some transactions that have entered the finality state,
-    /// and there is no need to record the dependency and dependent relationships of these transactions.
-    /// Thus achieving the purpose of pruning.
+    /// and there is no need to record the dependency and dependent relationships of these
+    /// transactions. Thus achieving the purpose of pruning.
     #[fastrace::trace]
     fn update_and_pruning_dependency(&mut self) {
         let num_finality_txs = self.num_finality_txs;
@@ -371,11 +376,12 @@ where
         self.metrics.skip_validation_cnt.increment((end_skip_id - self.num_finality_txs) as u64);
         fork_join_util(num_partitions, Some(num_partitions), |_, _, part| {
             // Transaction validation process:
-            // 1. For each transaction in each partition, traverse its read set and find the largest TxID(previous_txid)
-            //    in merged_write_set that are less than the current transaction's TxId.
-            // 2. A conflict occurs if:
-            //    a) `previous_txid`` does not belong to the current transaction's partition, or
-            //    b) `previous_txid` in same partition that is already marked as conflicted.
+            // 1. For each transaction in each partition, traverse its read set and find the largest
+            //    TxID(previous_txid) in merged_write_set that are less than the current
+            //    transaction's TxId.
+            // 2. A conflict occurs if: a) `previous_txid`` does not belong to the current
+            //    transaction's partition, or b) `previous_txid` in same partition that is already
+            //    marked as conflicted.
             let mut executor = self.partition_executors[part].write().unwrap();
             let executor = executor.deref_mut();
 
@@ -393,10 +399,10 @@ where
                             if let Some(previous_txid) = written_txs.range(..txid).next_back() {
                                 // update dependencies: previous_txid <- txid
                                 updated_dependencies.insert(*previous_txid);
-                                if !conflict
-                                    && (!executor.assigned_txs.binary_search(previous_txid).is_ok()
-                                        || tx_states[*previous_txid].tx_status
-                                            == TransactionStatus::Conflict)
+                                if !conflict &&
+                                    (!executor.assigned_txs.binary_search(previous_txid).is_ok() ||
+                                        tx_states[*previous_txid].tx_status ==
+                                            TransactionStatus::Conflict)
                                 {
                                     conflict = true;
                                 }
@@ -425,8 +431,8 @@ where
             self.metrics.reusable_tx_cnt.increment(executor.metrics.reusable_tx_cnt);
             min_execute_time = min_execute_time.min(executor.metrics.execute_time);
             max_execute_time = max_execute_time.max(executor.metrics.execute_time);
-            if executor.assigned_txs[0] == self.num_finality_txs
-                && self.tx_states[self.num_finality_txs].tx_status == TransactionStatus::Conflict
+            if executor.assigned_txs[0] == self.num_finality_txs &&
+                self.tx_states[self.num_finality_txs].tx_status == TransactionStatus::Conflict
             {
                 return Err(GrevmError::EvmError(
                     executor.error_txs.remove(&self.num_finality_txs).unwrap(),
@@ -506,8 +512,8 @@ where
         }
         // Each transaction updates three accounts: from, to, and coinbase.
         // If every tx updates the coinbase account, it will cause conflicts across all txs.
-        // Therefore, we handle miner rewards separately. We don't record miner’s address in r/w set,
-        // and track the rewards for the miner for each transaction separately.
+        // Therefore, we handle miner rewards separately. We don't record miner’s address in r/w
+        // set, and track the rewards for the miner for each transaction separately.
         // The miner’s account is only updated after validation by SchedulerDB.increment_balances
         database
             .update_balances(vec![(self.coinbase, LazyUpdateValue::merge(miner_updates))])

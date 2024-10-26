@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 
-use revm::db::{DbAccount, PlainAccount};
-use revm::interpreter::analysis::to_analysed;
-use revm::primitives::{uint, AccountInfo, Address, Bytecode, TransactTo, TxEnv, B256, U256};
+use revm::{
+    db::{DbAccount, PlainAccount},
+    interpreter::analysis::to_analysed,
+    primitives::{uint, AccountInfo, Address, Bytecode, TransactTo, TxEnv, B256, U256},
+};
 
 use crate::erc20::erc20_contract::ERC20Token;
 

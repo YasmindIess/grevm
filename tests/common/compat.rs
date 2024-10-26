@@ -10,8 +10,8 @@ pub(crate) fn get_block_spec(header: &Header) -> SpecId {
         SpecId::CANCUN
     } else if header.timestamp >= 1681338455 {
         SpecId::SHANGHAI
-    } else if total_difficulty.saturating_sub(header.difficulty)
-        >= U256::from(58_750_000_000_000_000_000_000_u128)
+    } else if total_difficulty.saturating_sub(header.difficulty) >=
+        U256::from(58_750_000_000_000_000_000_000_u128)
     {
         SpecId::MERGE
     } else if number >= 12965000 {

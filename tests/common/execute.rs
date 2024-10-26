@@ -4,22 +4,26 @@ use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 
 use alloy_chains::NamedChain;
 use grevm::{ExecuteOutput, GrevmError, GrevmScheduler};
-use revm::db::states::bundle_state::BundleRetention;
-use revm::db::states::StorageSlot;
-use revm::db::{BundleAccount, BundleState, PlainAccount};
-use revm::primitives::alloy_primitives::U160;
-use revm::primitives::{
-    uint, AccountInfo, Address, Bytecode, EVMError, Env, ExecutionResult, SpecId, TxEnv, B256,
-    KECCAK_EMPTY, U256,
+use revm::{
+    db::{
+        states::{bundle_state::BundleRetention, StorageSlot},
+        BundleAccount, BundleState, PlainAccount,
+    },
+    primitives::{
+        alloy_primitives::U160, uint, AccountInfo, Address, Bytecode, EVMError, Env,
+        ExecutionResult, SpecId, TxEnv, B256, KECCAK_EMPTY, U256,
+    },
+    DatabaseCommit, DatabaseRef, EvmBuilder, StateBuilder,
 };
-use revm::{DatabaseCommit, DatabaseRef, EvmBuilder, StateBuilder};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
-use std::fmt::Debug;
-use std::fs::{self, File};
-use std::io::BufReader;
-use std::sync::Arc;
-use std::time::Instant;
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt::Debug,
+    fs::{self, File},
+    io::BufReader,
+    sync::Arc,
+    time::Instant,
+};
 
 pub(crate) fn compare_bundle_state(left: &BundleState, right: &BundleState) {
     assert!(

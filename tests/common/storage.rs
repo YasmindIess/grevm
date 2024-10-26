@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 
-use revm::db::PlainAccount;
-use revm::primitives::alloy_primitives::U160;
-use revm::primitives::ruint::UintTryFrom;
-use revm::primitives::{keccak256, AccountInfo, Address, Bytecode, B256, I256, U256};
-use revm::DatabaseRef;
+use revm::{
+    db::PlainAccount,
+    primitives::{
+        alloy_primitives::U160, keccak256, ruint::UintTryFrom, AccountInfo, Address, Bytecode,
+        B256, I256, U256,
+    },
+    DatabaseRef,
+};
 
 /// A DatabaseRef that stores chain data in memory.
 #[derive(Debug, Default, Clone)]

@@ -2,15 +2,16 @@
 // Each family has Y people.
 // Each person performs Z transfers to random people within the family.
 
-use crate::common::START_ADDRESS;
-use crate::erc20::erc20_contract::ERC20Token;
-use crate::erc20::{
-    generate_cluster, generate_cluster_and_txs, TransactionModeType, TxnBatchConfig, GAS_LIMIT,
+use crate::{
+    common::START_ADDRESS,
+    erc20::{
+        erc20_contract::ERC20Token, generate_cluster, generate_cluster_and_txs,
+        TransactionModeType, TxnBatchConfig, GAS_LIMIT,
+    },
 };
 use common::storage::InMemoryDB;
 use metrics_util::debugging::DebugValue;
-use revm::primitives::alloy_primitives::U160;
-use revm::primitives::{uint, Address, TransactTo, TxEnv, U256};
+use revm::primitives::{alloy_primitives::U160, uint, Address, TransactTo, TxEnv, U256};
 use std::collections::HashMap;
 
 #[path = "../common/mod.rs"]

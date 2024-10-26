@@ -2,10 +2,12 @@ pub mod contract;
 
 use crate::erc20::erc20_contract::ERC20Token;
 use contract::{SingleSwap, SwapRouter, UniswapV3Factory, UniswapV3Pool, WETH9};
-use revm::db::PlainAccount;
-use revm::interpreter::analysis::to_analysed;
-use revm::primitives::{
-    uint, AccountInfo, Address, Bytecode, Bytes, HashMap, TransactTo, TxEnv, B256, U256,
+use revm::{
+    db::PlainAccount,
+    interpreter::analysis::to_analysed,
+    primitives::{
+        uint, AccountInfo, Address, Bytecode, Bytes, HashMap, TransactTo, TxEnv, B256, U256,
+    },
 };
 
 pub const GAS_LIMIT: u64 = 200_000;

@@ -1,10 +1,13 @@
 use crate::common::storage::{from_address, from_indices, from_short_string, StorageBuilder};
 use lazy_static::lazy_static;
-use revm::db::PlainAccount;
-use revm::interpreter::analysis::to_analysed;
-use revm::primitives::hex::FromHex;
-use revm::primitives::ruint::UintTryFrom;
-use revm::primitives::{fixed_bytes, AccountInfo, Address, Bytecode, Bytes, B256, U256};
+use revm::{
+    db::PlainAccount,
+    interpreter::analysis::to_analysed,
+    primitives::{
+        fixed_bytes, hex::FromHex, ruint::UintTryFrom, AccountInfo, Address, Bytecode, Bytes, B256,
+        U256,
+    },
+};
 use std::collections::HashMap;
 
 const ERC20_TOKEN: &str = include_str!("./contracts/ERC20Token.hex");

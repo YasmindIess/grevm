@@ -4,8 +4,7 @@ use crate::common::{MINER_ADDRESS, START_ADDRESS};
 use common::storage::InMemoryDB;
 use metrics_util::debugging::DebugValue;
 
-use revm::primitives::alloy_primitives::U160;
-use revm::primitives::{Address, TransactTo, TxEnv, U256};
+use revm::primitives::{alloy_primitives::U160, Address, TransactTo, TxEnv, U256};
 use std::collections::HashMap;
 
 const GIGA_GAS: u64 = 1_000_000_000;

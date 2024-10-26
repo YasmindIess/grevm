@@ -1,13 +1,17 @@
-use crate::storage::{PartitionDB, SchedulerDB};
 use crate::{
+    storage::{PartitionDB, SchedulerDB},
     LocationAndType, PartitionId, ResultAndTransition, SharedTxStates, TransactionStatus, TxId,
     TxState,
 };
-use revm::primitives::{Address, EVMError, Env, ResultAndState, SpecId, TxEnv, TxKind};
-use revm::{DatabaseRef, EvmBuilder};
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use revm::{
+    primitives::{Address, EVMError, Env, ResultAndState, SpecId, TxEnv, TxKind},
+    DatabaseRef, EvmBuilder,
+};
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 #[derive(Default)]
 pub(crate) struct PartitionMetrics {
@@ -16,15 +20,15 @@ pub(crate) struct PartitionMetrics {
 }
 
 /// The `PartitionExecutor` is tasked with executing transactions within a specific partition.
-/// Transactions are executed optimistically, and their read and write sets are recorded after execution.
-/// If a transaction fails, it is marked as a conflict; if it succeeds, it is marked as unconfirmed.
-/// The final state of a transaction is determined by the scheduler's validation process,
-/// which leverages the recorded read/write sets and execution results.
-/// This validation process uses the STM (Software Transactional Memory) algorithm, a standard conflict-checking method.
-/// Additionally, the read/write sets are used to update transaction dependencies.
-/// For instance, if transaction A's write set intersects with transaction B's read set, then B depends on A.
-/// These dependencies are then used to construct the next round of transaction partitions.
-/// The global state of transactions is maintained in `SharedTxStates`.
+/// Transactions are executed optimistically, and their read and write sets are recorded after
+/// execution. If a transaction fails, it is marked as a conflict; if it succeeds, it is marked as
+/// unconfirmed. The final state of a transaction is determined by the scheduler's validation
+/// process, which leverages the recorded read/write sets and execution results.
+/// This validation process uses the STM (Software Transactional Memory) algorithm, a standard
+/// conflict-checking method. Additionally, the read/write sets are used to update transaction
+/// dependencies. For instance, if transaction A's write set intersects with transaction B's read
+/// set, then B depends on A. These dependencies are then used to construct the next round of
+/// transaction partitions. The global state of transactions is maintained in `SharedTxStates`.
 /// Since the state of a transaction is not modified by multiple threads simultaneously,
 /// `SharedTxStates` is thread-safe. Unsafe code is used to convert `SharedTxStates` to
 /// a mutable reference, allowing modification of transaction states during execution.
@@ -87,8 +91,9 @@ where
     }
 
     /// Execute transactions in the partition
-    /// The transactions are executed optimistically, and their read and write sets are recorded after execution.
-    /// The final state of a transaction is determined by the scheduler's validation process.
+    /// The transactions are executed optimistically, and their read and write sets are recorded
+    /// after execution. The final state of a transaction is determined by the scheduler's
+    /// validation process.
     pub(crate) fn execute(&mut self) {
         let start = Instant::now();
         let mut evm = EvmBuilder::default()
@@ -113,7 +118,8 @@ where
             let mut should_execute = true;
             if tx_states[txid].tx_status == TransactionStatus::Unconfirmed {
                 if evm.db_mut().check_read_set(&tx_states[txid].read_set) {
-                    // Unconfirmed transactions from the previous round might not need to be re-executed.
+                    // Unconfirmed transactions from the previous round might not need to be
+                    // re-executed.
                     let transition = &tx_states[txid].execute_result.transition;
                     evm.db_mut().temporary_commit_transition(transition);
                     should_execute = false;
@@ -131,9 +137,10 @@ where
                             evm.db().generate_write_set(&mut state);
 
                         // Check if the transaction can be skipped
-                        // skip_validation=true does not necessarily mean the transaction can skip validation.
-                        // Only transactions with consecutive minimum TxID can skip validation.
-                        // This is because if a transaction with a smaller TxID conflicts,
+                        // skip_validation=true does not necessarily mean the transaction can skip
+                        // validation. Only transactions with consecutive
+                        // minimum TxID can skip validation. This is because
+                        // if a transaction with a smaller TxID conflicts,
                         // the states of subsequent transactions are invalid.
                         let mut skip_validation =
                             read_set.iter().all(|l| tx_states[txid].read_set.contains_key(l.0));
@@ -145,10 +152,12 @@ where
                             state.remove(&self.coinbase);
                         } else {
                             // add miner to read set, because it's in write set.
-                            // set miner's value to None to make this tx redo in next round if unconfirmed.
+                            // set miner's value to None to make this tx redo in next round if
+                            // unconfirmed.
                             read_set.insert(LocationAndType::Basic(self.coinbase), None);
                         }
-                        // temporary commit to cache_db, to make use the remaining txs can read the updated data
+                        // temporary commit to cache_db, to make use the remaining txs can read the
+                        // updated data
                         let transition = evm.db_mut().temporary_commit(state);
                         tx_states[txid] = TxState {
                             tx_status: if skip_validation {
@@ -166,11 +175,13 @@ where
                         };
                     }
                     Err(err) => {
-                        // In a parallel execution environment, transactions might fail due to reasons
-                        // such as dependent transfers not being received yet.
-                        // Therefore, a transaction failure does not necessarily lead to a block failure.
-                        // Only transactions that are in the FINALITY state can cause a block failure.
-                        // During verification, failed transactions are marked as being in a conflict state.
+                        // In a parallel execution environment, transactions might fail due to
+                        // reasons such as dependent transfers not being
+                        // received yet. Therefore, a transaction failure
+                        // does not necessarily lead to a block failure.
+                        // Only transactions that are in the FINALITY state can cause a block
+                        // failure. During verification, failed transactions
+                        // are marked as being in a conflict state.
 
                         // update read set
                         let mut read_set = evm.db_mut().take_read_set();

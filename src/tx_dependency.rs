@@ -1,6 +1,8 @@
 use smallvec::SmallVec;
-use std::cmp::{min, Reverse};
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, VecDeque};
+use std::{
+    cmp::{min, Reverse},
+    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, VecDeque},
+};
 
 use crate::{fork_join_util, LocationAndType, SharedTxStates, TxId};
 
@@ -17,13 +19,14 @@ pub(crate) struct TxDependency {
     num_finality_txs: usize,
 
     // After one round of transaction execution,
-    // the running time can be obtained, which can make the next round of partitioning more balanced.
+    // the running time can be obtained, which can make the next round of partitioning more
+    // balanced.
     #[allow(dead_code)]
     tx_running_time: Option<Vec<u64>>,
 
     // Partitioning is balanced based on weights.
-    // In the first round, weights can be assigned based on transaction type and called contract type,
-    // while in the second round, weights can be assigned based on tx_running_time.
+    // In the first round, weights can be assigned based on transaction type and called contract
+    // type, while in the second round, weights can be assigned based on tx_running_time.
     #[allow(dead_code)]
     tx_weight: Option<Vec<usize>>,
 }
@@ -183,15 +186,16 @@ impl TxDependency {
 
     /// Update the dependency relationship between transactions.
     /// After each round of transaction execution, update the dependencies between transactions.
-    /// The new dependencies are used to optimize the partitioning for the next round of transactions,
-    /// ensuring that conflicting transactions can read the transactions they depend on.
+    /// The new dependencies are used to optimize the partitioning for the next round of
+    /// transactions, ensuring that conflicting transactions can read the transactions they
+    /// depend on.
     pub(crate) fn update_tx_dependency(
         &mut self,
         tx_dependency: Vec<DependentTxsVec>,
         num_finality_txs: usize,
     ) {
-        if (self.tx_dependency.len() + self.num_finality_txs)
-            != (tx_dependency.len() + num_finality_txs)
+        if (self.tx_dependency.len() + self.num_finality_txs) !=
+            (tx_dependency.len() + num_finality_txs)
         {
             panic!("Different transaction number");
         }
