@@ -16,6 +16,11 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use fastrace::{collector::Config, prelude::*};
 use fastrace_jaeger::JaegerReporter;
 use grevm::GrevmScheduler;
+use metrics::{SharedString, Unit};
+use metrics_util::{
+    debugging::{DebugValue, DebuggingRecorder},
+    CompositeKey, MetricKind,
+};
 use rand::Rng;
 use revm::primitives::{alloy_primitives::U160, Address, Env, SpecId, TransactTo, TxEnv, U256};
 use std::{collections::HashMap, sync::Arc};
@@ -25,49 +30,96 @@ const GIGA_GAS: u64 = 1_000_000_000;
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+fn get_metrics_counter_value(
+    snapshot: &HashMap<CompositeKey, (Option<Unit>, Option<SharedString>, DebugValue)>,
+    name: &'static str,
+) -> u64 {
+    match snapshot
+        .get(&CompositeKey::new(MetricKind::Counter, metrics::Key::from_static_name(name)))
+    {
+        Some((_, _, DebugValue::Counter(value))) => *value,
+        _ => panic!("{:?} not found", name),
+    }
+}
+
 fn bench(c: &mut Criterion, name: &str, db: InMemoryDB, txs: Vec<TxEnv>) {
     let mut env = Env::default();
     env.cfg.chain_id = NamedChain::Mainnet.into();
     env.block.coinbase = Address::from(U160::from(common::MINER_ADDRESS));
     let db = Arc::new(db);
+    let txs = Arc::new(txs);
 
-    let mut group = c.benchmark_group(name);
+    let mut group = c.benchmark_group(format!("{}({} txs)", name, txs.len()));
     group.bench_function("Origin Sequential", |b| {
         b.iter(|| {
             common::execute_revm_sequential(
                 black_box(db.clone()),
                 black_box(SpecId::LATEST),
                 black_box(env.clone()),
-                black_box(txs.clone()),
+                black_box(&*txs),
             )
         })
     });
+
+    let mut num_iter: usize = 0;
+    let mut execution_time_ns: u64 = 0;
     group.bench_function("Grevm Parallel", |b| {
         b.iter(|| {
+            num_iter += 1;
+            let recorder = DebuggingRecorder::new();
             let root = Span::root(format!("{name} Grevm Parallel"), SpanContext::random());
             let _guard = root.set_local_parent();
-            let executor = GrevmScheduler::new(
-                black_box(SpecId::LATEST),
-                black_box(env.clone()),
-                black_box(db.clone()),
-                black_box(txs.clone()),
-            );
-            executor.parallel_execute()
+            metrics::with_local_recorder(&recorder, || {
+                let executor = GrevmScheduler::new(
+                    black_box(SpecId::LATEST),
+                    black_box(env.clone()),
+                    black_box(db.clone()),
+                    black_box(txs.clone()),
+                );
+                let _ = executor.parallel_execute();
+
+                let snapshot = recorder.snapshotter().snapshot().into_hashmap();
+                execution_time_ns +=
+                    get_metrics_counter_value(&snapshot, "grevm.parallel_execute_time");
+                execution_time_ns += get_metrics_counter_value(&snapshot, "grevm.validate_time");
+            });
         })
     });
+    println!(
+        "{} Grevm Parallel average execution time: {:.2} ms",
+        name,
+        execution_time_ns as f64 / num_iter as f64 / 1000000.0
+    );
+
+    let mut num_iter: usize = 0;
+    let mut execution_time_ns: u64 = 0;
     group.bench_function("Grevm Sequential", |b| {
         b.iter(|| {
+            num_iter += 1;
+            let recorder = DebuggingRecorder::new();
             let root = Span::root(format!("{name} Grevm Sequential"), SpanContext::random());
             let _guard = root.set_local_parent();
-            let executor = GrevmScheduler::new(
-                black_box(SpecId::LATEST),
-                black_box(env.clone()),
-                black_box(db.clone()),
-                black_box(txs.clone()),
-            );
-            executor.force_sequential_execute()
+            metrics::with_local_recorder(&recorder, || {
+                let executor = GrevmScheduler::new(
+                    black_box(SpecId::LATEST),
+                    black_box(env.clone()),
+                    black_box(db.clone()),
+                    black_box(txs.clone()),
+                );
+                let _ = executor.force_sequential_execute();
+
+                let snapshot = recorder.snapshotter().snapshot().into_hashmap();
+                execution_time_ns +=
+                    get_metrics_counter_value(&snapshot, "grevm.sequential_execute_time");
+            });
         })
     });
+    println!(
+        "{} Grevm Sequential average execution time: {:.2} ms",
+        name,
+        execution_time_ns as f64 / num_iter as f64 / 1000000.0
+    );
+
     group.finish();
 }
 
@@ -96,15 +148,19 @@ fn bench_raw_transfers(c: &mut Criterion, db_latency_us: u64) {
     );
 }
 
-fn get_account_idx(num_eoa: usize, hot_start_idx: usize, hot_ratio: f64) -> usize {
+fn pick_account_idx(num_eoa: usize, hot_ratio: f64) -> usize {
     if hot_ratio <= 0.0 {
         // Uniform workload
-        rand::random::<usize>() % num_eoa
-    } else if rand::thread_rng().gen_range(0.0..1.0) < hot_ratio {
+        return rand::random::<usize>() % num_eoa;
+    }
+
+    // Let `hot_ratio` of transactions conducted by 10% of hot accounts
+    let hot_start_idx = (num_eoa as f64 * 0.9) as usize;
+    if rand::thread_rng().gen_range(0.0..1.0) < hot_ratio {
         // Access hot
         hot_start_idx + rand::random::<usize>() % (num_eoa - hot_start_idx)
     } else {
-        rand::random::<usize>() % (num_eoa - hot_start_idx)
+        rand::random::<usize>() % hot_start_idx
     }
 }
 
@@ -119,9 +175,6 @@ fn bench_dependent_raw_transfers(
     let mut db = InMemoryDB::new(accounts, Default::default(), Default::default());
     db.latency_us = db_latency_us;
 
-    // Let 10% of the accounts be hot accounts
-    let hot_start_idx = common::START_ADDRESS + (num_eoa as f64 * 0.9) as usize;
-
     bench(
         c,
         "Dependent Raw Transfers",
@@ -129,10 +182,10 @@ fn bench_dependent_raw_transfers(
         (0..block_size)
             .map(|_| {
                 let from = Address::from(U160::from(
-                    common::START_ADDRESS + get_account_idx(num_eoa, hot_start_idx, hot_ratio),
+                    common::START_ADDRESS + pick_account_idx(num_eoa, hot_ratio),
                 ));
                 let to = Address::from(U160::from(
-                    common::START_ADDRESS + get_account_idx(num_eoa, hot_start_idx, hot_ratio),
+                    common::START_ADDRESS + pick_account_idx(num_eoa, hot_ratio),
                 ));
                 TxEnv {
                     caller: from,
@@ -203,12 +256,9 @@ fn benchmark_dependent_erc20(
     let mut txs = Vec::with_capacity(block_size);
     let sca = sca[0];
 
-    // Let 10% of the accounts be hot accounts
-    let hot_start_idx = common::START_ADDRESS + (num_eoa as f64 * 0.9) as usize;
-
     for _ in 0..block_size {
-        let from = eoa[get_account_idx(num_eoa, hot_start_idx, hot_ratio)];
-        let to = eoa[get_account_idx(num_eoa, hot_start_idx, hot_ratio)];
+        let from = eoa[pick_account_idx(num_eoa, hot_ratio)];
+        let to = eoa[pick_account_idx(num_eoa, hot_ratio)];
         let tx = TxEnv {
             caller: from,
             transact_to: TransactTo::Call(sca),
@@ -250,19 +300,15 @@ fn bench_hybrid(c: &mut Criterion, db_latency_us: u64, num_eoa: usize, hot_ratio
         (GIGA_GAS as f64 * 0.2 / erc20::ESTIMATED_GAS_USED as f64).ceil() as usize;
     let num_uniswap = (GIGA_GAS as f64 * 0.2 / uniswap::ESTIMATED_GAS_USED as f64).ceil() as usize;
 
-    // Let 10% of the accounts be hot accounts
-    let hot_start_idx = common::START_ADDRESS + (num_eoa as f64 * 0.9) as usize;
     let mut state = common::mock_block_accounts(common::START_ADDRESS, num_eoa);
     let eoa_addresses = state.keys().cloned().collect::<Vec<_>>();
     let mut txs = Vec::with_capacity(num_native_transfer + num_erc20_transfer + num_uniswap);
 
     for _ in 0..num_native_transfer {
-        let from = Address::from(U160::from(
-            common::START_ADDRESS + get_account_idx(num_eoa, hot_start_idx, hot_ratio),
-        ));
-        let to = Address::from(U160::from(
-            common::START_ADDRESS + get_account_idx(num_eoa, hot_start_idx, hot_ratio),
-        ));
+        let from =
+            Address::from(U160::from(common::START_ADDRESS + pick_account_idx(num_eoa, hot_ratio)));
+        let to =
+            Address::from(U160::from(common::START_ADDRESS + pick_account_idx(num_eoa, hot_ratio)));
         let tx = TxEnv {
             caller: from,
             transact_to: TransactTo::Call(to),
@@ -280,10 +326,10 @@ fn bench_hybrid(c: &mut Criterion, db_latency_us: u64, num_eoa: usize, hot_ratio
     for (sca_addr, _) in erc20_contract_accounts.iter() {
         for _ in 0..(num_erc20_transfer / NUM_ERC20_SCA) {
             let from = Address::from(U160::from(
-                common::START_ADDRESS + get_account_idx(num_eoa, hot_start_idx, hot_ratio),
+                common::START_ADDRESS + pick_account_idx(num_eoa, hot_ratio),
             ));
             let to = Address::from(U160::from(
-                common::START_ADDRESS + get_account_idx(num_eoa, hot_start_idx, hot_ratio),
+                common::START_ADDRESS + pick_account_idx(num_eoa, hot_ratio),
             ));
             let tx = TxEnv {
                 caller: from,
@@ -315,7 +361,7 @@ fn bench_hybrid(c: &mut Criterion, db_latency_us: u64, num_eoa: usize, hot_ratio
 
             txs.push(TxEnv {
                 caller: Address::from(U160::from(
-                    common::START_ADDRESS + get_account_idx(num_eoa, hot_start_idx, hot_ratio),
+                    common::START_ADDRESS + pick_account_idx(num_eoa, hot_ratio),
                 )),
                 gas_limit: uniswap::GAS_LIMIT,
                 gas_price: U256::from(0xb2d05e07u64),
