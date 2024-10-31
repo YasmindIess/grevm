@@ -1,16 +1,21 @@
-use crate::{LocationAndType, LocationSet};
+use crate::{fork_join_util, LocationAndType, LocationSet};
+use ahash::{AHashMap, AHashSet};
+use fastrace::Span;
 use revm::{
     db::{
         states::{bundle_state::BundleRetention, CacheAccount},
-        BundleState, PlainAccount,
+        AccountRevert, BundleAccount, BundleState, PlainAccount,
     },
     precompile::Address,
     primitives::{Account, AccountInfo, Bytecode, EvmState, B256, BLOCK_HASH_HISTORY, U256},
     CacheState, Database, DatabaseRef, TransitionAccount, TransitionState,
 };
 use std::{
-    collections::{btree_map, hash_map, BTreeMap, HashMap, HashSet},
-    sync::Arc,
+    collections::{btree_map, hash_map, BTreeMap, HashMap},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 
 /// LazyUpdateValue is used to update the balance of the miner's account.
@@ -65,6 +70,87 @@ impl LazyUpdateValue {
         } else {
             Self::Decrease(value)
         }
+    }
+}
+
+trait ParallelBundleState {
+    fn parallel_apply_transitions_and_create_reverts(
+        &mut self,
+        transitions: TransitionState,
+        retention: BundleRetention,
+    );
+}
+
+impl ParallelBundleState for BundleState {
+    #[fastrace::trace]
+    fn parallel_apply_transitions_and_create_reverts(
+        &mut self,
+        transitions: TransitionState,
+        retention: BundleRetention,
+    ) {
+        assert!(self.state.is_empty());
+        let include_reverts = retention.includes_reverts();
+        // pessimistically pre-allocate assuming _all_ accounts changed.
+        let reverts_capacity = if include_reverts { transitions.transitions.len() } else { 0 };
+        let transitions = transitions.transitions;
+        let addresses: Vec<Address> = transitions.keys().cloned().collect();
+        let reverts: Vec<Option<(Address, AccountRevert)>> = vec![None; reverts_capacity];
+        let bundle_state: Vec<Option<(Address, BundleAccount)>> = vec![None; transitions.len()];
+        let state_size = AtomicUsize::new(0);
+        let contracts = Mutex::new(HashMap::new());
+
+        let span = Span::enter_with_local_parent("parallel create reverts");
+        fork_join_util(transitions.len(), None, |start_pos, end_pos, _| {
+            #[allow(invalid_reference_casting)]
+            let reverts = unsafe {
+                &mut *(&reverts as *const Vec<Option<(Address, AccountRevert)>>
+                    as *mut Vec<Option<(Address, AccountRevert)>>)
+            };
+            #[allow(invalid_reference_casting)]
+            let addresses =
+                unsafe { &mut *(&addresses as *const Vec<Address> as *mut Vec<Address>) };
+            #[allow(invalid_reference_casting)]
+            let bundle_state = unsafe {
+                &mut *(&bundle_state as *const Vec<Option<(Address, BundleAccount)>>
+                    as *mut Vec<Option<(Address, BundleAccount)>>)
+            };
+
+            for pos in start_pos..end_pos {
+                let address = addresses[pos];
+                let transition = transitions.get(&address).cloned().unwrap();
+                // add new contract if it was created/changed.
+                if let Some((hash, new_bytecode)) = transition.has_new_contract() {
+                    contracts.lock().unwrap().insert(hash, new_bytecode.clone());
+                }
+                let present_bundle = transition.present_bundle_account();
+                let revert = transition.create_revert();
+                if let Some(revert) = revert {
+                    state_size.fetch_add(present_bundle.size_hint(), Ordering::Relaxed);
+                    bundle_state[pos] = Some((address, present_bundle));
+                    if include_reverts {
+                        reverts[pos] = Some((address, revert));
+                    }
+                }
+            }
+        });
+        self.state_size = state_size.load(Ordering::Acquire);
+        drop(span);
+
+        // much faster than bundle_state.into_iter().filter_map(|r| r).collect()
+        self.state.reserve(transitions.len());
+        for bundle in bundle_state {
+            if let Some((address, state)) = bundle {
+                self.state.insert(address, state);
+            }
+        }
+        let mut final_reverts = Vec::with_capacity(reverts_capacity);
+        for revert in reverts {
+            if let Some(r) = revert {
+                final_reverts.push(r);
+            }
+        }
+        self.reverts.push(final_reverts);
+        self.contracts = contracts.into_inner().unwrap();
     }
 }
 
@@ -143,7 +229,8 @@ impl<DB> SchedulerDB<DB> {
     #[fastrace::trace]
     pub(crate) fn merge_transitions(&mut self, retention: BundleRetention) {
         if let Some(transition_state) = self.transition_state.as_mut().map(TransitionState::take) {
-            self.bundle_state.apply_transitions_and_create_reverts(transition_state, retention);
+            self.bundle_state
+                .parallel_apply_transitions_and_create_reverts(transition_state, retention);
         }
     }
 }
@@ -345,7 +432,7 @@ pub(crate) struct PartitionDB<DB> {
     pub block_hashes: BTreeMap<u64, B256>,
 
     /// Record the read set of current tx, will be consumed after the execution of each tx
-    tx_read_set: HashMap<LocationAndType, Option<U256>>,
+    tx_read_set: AHashMap<LocationAndType, Option<U256>>,
 }
 
 impl<DB> PartitionDB<DB> {
@@ -355,12 +442,12 @@ impl<DB> PartitionDB<DB> {
             cache: CacheState::new(false),
             scheduler_db,
             block_hashes: BTreeMap::new(),
-            tx_read_set: HashMap::new(),
+            tx_read_set: AHashMap::new(),
         }
     }
 
     /// consume the read set after evm.transact() for each tx
-    pub(crate) fn take_read_set(&mut self) -> HashMap<LocationAndType, Option<U256>> {
+    pub(crate) fn take_read_set(&mut self) -> AHashMap<LocationAndType, Option<U256>> {
         core::mem::take(&mut self.tx_read_set)
     }
 
@@ -373,7 +460,7 @@ impl<DB> PartitionDB<DB> {
     ) -> (LocationSet, LazyUpdateValue, bool) {
         let mut miner_update = LazyUpdateValue::default();
         let mut remove_miner = true;
-        let mut write_set = HashSet::new();
+        let mut write_set = AHashSet::new();
         for (address, account) in &mut *changes {
             if account.is_selfdestructed() {
                 write_set.insert(LocationAndType::Code(*address));
@@ -483,9 +570,9 @@ where
     /// transaction.
     pub(crate) fn check_read_set(
         &mut self,
-        read_set: &HashMap<LocationAndType, Option<U256>>,
+        read_set: &AHashMap<LocationAndType, Option<U256>>,
     ) -> bool {
-        let mut visit_account = HashSet::new();
+        let mut visit_account = AHashSet::new();
         for (location, _) in read_set {
             match location {
                 LocationAndType::Basic(address) => {
