@@ -1,5 +1,4 @@
 use crate::common::{storage::InMemoryDB, MINER_ADDRESS};
-use alloy_rpc_types::Block;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 
 use alloy_chains::NamedChain;
@@ -7,7 +6,7 @@ use grevm::{ExecuteOutput, GrevmScheduler};
 use revm::{
     db::{
         states::{bundle_state::BundleRetention, StorageSlot},
-        BundleAccount, BundleState, PlainAccount,
+        AccountRevert, BundleAccount, BundleState, PlainAccount,
     },
     primitives::{
         alloy_primitives::U160, uint, AccountInfo, Address, Bytecode, EVMError, Env,
@@ -15,7 +14,7 @@ use revm::{
     },
     DatabaseCommit, DatabaseRef, EvmBuilder, StateBuilder,
 };
-use serde::{Deserialize, Serialize};
+use revm_primitives::EnvWithHandlerCfg;
 use std::{
     collections::{BTreeMap, HashMap},
     fmt::Debug,
@@ -51,10 +50,20 @@ pub(crate) fn compare_bundle_state(left: &BundleState, right: &BundleState) {
         assert_eq!(account1.info, account2.info, "Address: {:?}", addr1);
         assert_eq!(account1.original_info, account2.original_info, "Address: {:?}", addr1);
         assert_eq!(account1.status, account2.status, "Address: {:?}", addr1);
+        assert_eq!(account1.storage.len(), account2.storage.len());
         let left_storage: BTreeMap<&U256, &StorageSlot> = account1.storage.iter().collect();
         let right_storage: BTreeMap<&U256, &StorageSlot> = account2.storage.iter().collect();
         for (s1, s2) in left_storage.into_iter().zip(right_storage.into_iter()) {
             assert_eq!(s1, s2, "Address: {:?}", addr1);
+        }
+    }
+
+    assert_eq!(left.reverts.len(), right.reverts.len());
+    for (left, right) in left.reverts.iter().zip(right.reverts.iter()) {
+        assert_eq!(left.len(), right.len());
+        let right: HashMap<&Address, &AccountRevert> = right.iter().map(|(k, v)| (k, v)).collect();
+        for (addr, revert) in left.iter() {
+            assert_eq!(revert, *right.get(addr).unwrap(), "Address: {:?}", addr);
         }
     }
 }
@@ -183,11 +192,7 @@ where
     DB: DatabaseRef,
     DB::Error: Debug,
 {
-    let db = StateBuilder::new()
-        .with_bundle_update()
-        .without_state_clear()
-        .with_database_ref(db)
-        .build();
+    let db = StateBuilder::new().with_bundle_update().with_database_ref(db).build();
     let mut evm =
         EvmBuilder::default().with_db(db).with_spec_id(spec_id).with_env(Box::new(env)).build();
 
@@ -204,19 +209,6 @@ where
     Ok((ExecuteOutput { results }, evm.db_mut().take_bundle()))
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-struct JsonAccount {
-    /// The account's balance.
-    pub balance: U256,
-    /// The account's nonce.
-    pub nonce: u64,
-    /// The optional code hash of the account.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub code_hash: Option<B256>,
-    /// The account's storage.
-    pub storage: HashMap<U256, U256>,
-}
-
 const TEST_DATA_DIR: &str = "test_data";
 
 pub(crate) fn load_bytecodes_from_disk() -> HashMap<B256, Bytecode> {
@@ -229,46 +221,41 @@ pub(crate) fn load_bytecodes_from_disk() -> HashMap<B256, Bytecode> {
 
 pub(crate) fn load_block_from_disk(
     block_number: u64,
-) -> (Block, HashMap<Address, PlainAccount>, HashMap<u64, B256>) {
+) -> (EnvWithHandlerCfg, Vec<TxEnv>, InMemoryDB) {
     // Parse block
-    let block: Block = serde_json::from_reader(BufReader::new(
-        File::open(format!("{TEST_DATA_DIR}/blocks/{block_number}/block.json")).unwrap(),
+    let env: EnvWithHandlerCfg = serde_json::from_reader(BufReader::new(
+        File::open(format!("{TEST_DATA_DIR}/blocks/{block_number}/env.json")).unwrap(),
+    ))
+    .unwrap();
+    let txs: Vec<TxEnv> = serde_json::from_reader(BufReader::new(
+        File::open(format!("{TEST_DATA_DIR}/blocks/{block_number}/txs.json")).unwrap(),
     ))
     .unwrap();
 
     // Parse state
-    let accounts: HashMap<Address, JsonAccount> = serde_json::from_reader(BufReader::new(
+    let accounts: HashMap<Address, PlainAccount> = serde_json::from_reader(BufReader::new(
         File::open(format!("{TEST_DATA_DIR}/blocks/{block_number}/pre_state.json")).unwrap(),
     ))
     .unwrap();
-    let accounts: HashMap<Address, PlainAccount> = accounts
-        .into_iter()
-        .map(|(address, account)| {
-            let account = PlainAccount {
-                info: AccountInfo {
-                    balance: account.balance,
-                    nonce: account.nonce,
-                    code_hash: account.code_hash.unwrap_or_else(|| KECCAK_EMPTY),
-                    code: None,
-                },
-                storage: account.storage,
-            };
-            (address, account)
-        })
-        .collect();
 
     // Parse block hashes
     let block_hashes: HashMap<u64, B256> =
         File::open(format!("{TEST_DATA_DIR}/blocks/{block_number}/block_hashes.json"))
-            .map(|file| {
-                serde_json::from_reader::<_, HashMap<u64, B256>>(BufReader::new(file)).unwrap()
-            })
+            .map(|file| serde_json::from_reader(BufReader::new(file)).unwrap())
             .unwrap_or_default();
 
-    (block, accounts, block_hashes)
+    // Parse bytecodes
+    let bytecodes: HashMap<B256, Bytecode> =
+        File::open(format!("{TEST_DATA_DIR}/blocks/{block_number}/bytecodes.bincode"))
+            .map(|file| bincode::deserialize_from(BufReader::new(file)).unwrap())
+            .unwrap_or_default();
+
+    (env, txs, InMemoryDB::new(accounts, bytecodes, block_hashes))
 }
 
-pub(crate) fn for_each_block_from_disk(mut handler: impl FnMut(Block, InMemoryDB)) {
+pub(crate) fn for_each_block_from_disk(
+    mut handler: impl FnMut(EnvWithHandlerCfg, Vec<TxEnv>, InMemoryDB),
+) {
     // Parse bytecodes
     let bytecodes = load_bytecodes_from_disk();
 
@@ -276,7 +263,11 @@ pub(crate) fn for_each_block_from_disk(mut handler: impl FnMut(Block, InMemoryDB
         let block_path = block_path.unwrap().path();
         let block_number = block_path.file_name().unwrap().to_str().unwrap();
 
-        let (block, accounts, block_hashes) = load_block_from_disk(block_number.parse().unwrap());
-        handler(block, InMemoryDB::new(accounts, bytecodes.clone(), block_hashes));
+        let (env, txs, mut db) = load_block_from_disk(block_number.parse().unwrap());
+        if db.bytecodes.is_empty() {
+            // Use the global bytecodes if the block doesn't have its own
+            db.bytecodes = bytecodes.clone();
+        }
+        handler(env, txs, db);
     }
 }

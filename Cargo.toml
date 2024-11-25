@@ -5,7 +5,8 @@ edition = "2021"
 description = "Create Parallel EVM"
 
 [dependencies]
-revm = "14.0.0"
+revm = { package = "revm", git = "https://github.com/nekomoto911/revm", rev = "875f5ad" }
+revm-primitives = { package = "revm-primitives", git = "https://github.com/nekomoto911/revm", rev = "875f5ad" }
 fastrace = "0.7"
 tracing = "0.1.40"
 ahash = { version = "0.8.11", features = ["serde"] }
@@ -33,15 +34,12 @@ criterion = "0.5.1"
 metrics-util = "0.17.0"
 walkdir = "2.5.0"
 rayon = "1.10.0"
-revme = "0.10.3"
+revme = { package = "revme", git = "https://github.com/nekomoto911/revm", rev = "875f5ad" }
 fastrace = { version = "0.7", features = ["enable"] }
 fastrace-jaeger = "0.7"
 tikv-jemallocator = "0.5.0"
 bincode = "1.3.3"
-serde = { version = "1.0", default-features = false }
 serde_json = "1.0.94"
-alloy-rpc-types = "0.3.0"
-alloy-consensus = { version = "0.3.0", default-features = false }
 
 [lints]
 rust.missing_debug_implementations = "warn"

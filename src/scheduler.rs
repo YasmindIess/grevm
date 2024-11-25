@@ -208,7 +208,7 @@ pub fn new_grevm_scheduler<DB>(
     spec_id: SpecId,
     env: Env,
     db: DB,
-    txs: Vec<TxEnv>,
+    txs: Arc<Vec<TxEnv>>,
     state: Option<Box<State>>,
 ) -> GrevmScheduler<DatabaseWrapper<DB::Error>>
 where
@@ -226,7 +226,7 @@ where
         >(boxed)
     };
     let db: DatabaseWrapper<DB::Error> = DatabaseWrapper(db);
-    GrevmScheduler::new(spec_id, env, db, Arc::new(txs), state)
+    GrevmScheduler::new(spec_id, env, db, txs, state)
 }
 
 impl<DB> GrevmScheduler<DB>
