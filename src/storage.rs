@@ -419,7 +419,7 @@ pub(crate) struct PartitionDB<DB> {
     pub current_txid: TxId,
     pub raw_transfer: bool,
     rewards_accumulators: Arc<RewardsAccumulators>,
-    accumulated_rewards: u128,
+    pub accumulated_rewards: u128,
 }
 
 impl<DB> PartitionDB<DB> {

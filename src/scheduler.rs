@@ -21,7 +21,10 @@ use revm::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::DerefMut,
-    sync::{atomic::AtomicUsize, Arc, RwLock},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, RwLock,
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::Notify;
@@ -137,6 +140,7 @@ pub(crate) struct RewardsAccumulator {
     pub accumulate_counter: AtomicUsize,
     pub accumulate_rewards: Atomic<u128>,
     pub notifier: Arc<Notify>,
+    pub rewards_committed: AtomicBool,
 }
 
 impl RewardsAccumulator {
@@ -146,6 +150,7 @@ impl RewardsAccumulator {
             accumulate_counter: AtomicUsize::new(0),
             accumulate_rewards: Atomic::<u128>::new(0),
             notifier: Arc::new(Notify::new()),
+            rewards_committed: AtomicBool::new(false),
         }
     }
 }
@@ -556,11 +561,13 @@ where
 
         let span = Span::enter_with_local_parent("database commit transitions");
         let mut rewards = 0;
-        let rewards_start_txid =
-            match self.rewards_accumulators.range(..self.num_finality_txs).next_back() {
-                Some((txid, _)) => *txid,
-                None => start_txid,
-            };
+        let mut rewards_start_txid = start_txid;
+        for (txid, accumulator) in self.rewards_accumulators.range(..self.num_finality_txs).rev() {
+            if accumulator.rewards_committed.load(Ordering::Acquire) {
+                rewards_start_txid = *txid;
+                break;
+            }
+        }
         for txid in start_txid..self.num_finality_txs {
             if txid >= rewards_start_txid {
                 rewards += tx_states[txid].execute_result.rewards;

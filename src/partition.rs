@@ -104,6 +104,7 @@ where
     pub(crate) fn execute(&mut self) {
         let start = Instant::now();
         let coinbase = self.env.block.coinbase;
+        let mut committed_accumulated_rewards = 0;
         let mut evm = EvmBuilder::default()
             .with_db(&mut self.partition_db)
             .with_spec_id(self.spec_id)
@@ -173,6 +174,16 @@ where
                             read_set.iter().all(|l| tx_states[txid].read_set.contains_key(l.0));
                         skip_validation &=
                             write_set.iter().all(|l| tx_states[txid].write_set.contains(l));
+                        if let Some(accumulator) = self.rewards_accumulators.get(&txid) {
+                            let contains_miner =
+                                write_set.contains(&LocationAndType::Basic(coinbase));
+                            accumulator.rewards_committed.store(contains_miner, Ordering::Release);
+                            if contains_miner {
+                                committed_accumulated_rewards = evm.db().accumulated_rewards;
+                            } else {
+                                evm.db_mut().accumulated_rewards = committed_accumulated_rewards;
+                            }
+                        }
 
                         // temporary commit to cache_db, to make use the remaining txs can read the
                         // updated data
