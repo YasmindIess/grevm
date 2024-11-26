@@ -1,4 +1,7 @@
-use crate::{fork_join_util, LocationAndType, LocationSet};
+use crate::{
+    fork_join_util, scheduler::RewardsAccumulators, LocationAndType, LocationSet, TxId,
+    GREVM_RUNTIME,
+};
 use ahash::{AHashMap, AHashSet};
 use fastrace::Span;
 use revm::{
@@ -17,61 +20,7 @@ use std::{
         Arc, Mutex,
     },
 };
-
-/// LazyUpdateValue is used to update the balance of the miner's account.
-/// The miner's reward is calculated by subtracting the previous balance from the current balance.
-#[derive(Debug, Clone)]
-pub(crate) enum LazyUpdateValue {
-    Increase(u128),
-    Decrease(u128),
-}
-
-impl Default for LazyUpdateValue {
-    fn default() -> Self {
-        Self::Increase(0)
-    }
-}
-
-/// Merge multiple LazyUpdateValue into one.
-impl LazyUpdateValue {
-    pub(crate) fn merge(values: Vec<Self>) -> Self {
-        let mut value: u128 = 0;
-        let mut positive: bool = true;
-        for lazy_value in values {
-            match lazy_value {
-                Self::Increase(inc) => {
-                    if positive {
-                        value += inc;
-                    } else {
-                        if value > inc {
-                            value -= inc
-                        } else {
-                            value = inc - value;
-                            positive = true;
-                        }
-                    }
-                }
-                Self::Decrease(dec) => {
-                    if positive {
-                        if value > dec {
-                            value -= dec;
-                        } else {
-                            value = dec - value;
-                            positive = false;
-                        }
-                    } else {
-                        value += dec;
-                    }
-                }
-            }
-        }
-        if positive {
-            Self::Increase(value)
-        } else {
-            Self::Decrease(value)
-        }
-    }
-}
+use tokio::time::{timeout, Duration};
 
 trait ParallelBundleState {
     fn parallel_apply_transitions_and_create_reverts(
@@ -278,26 +227,24 @@ where
         }
     }
 
-    /// The miner's reward is calculated by subtracting the previous balance from the current
+    /// The miner's rewards is calculated by subtracting the previous balance from the current
     /// balance. and should add to the miner's account after each round of execution for
     /// finality transactions.
-    pub(crate) fn update_balances(
+    pub(crate) fn increment_balances(
         &mut self,
-        balances: impl IntoIterator<Item = (Address, LazyUpdateValue)>,
+        balances: impl IntoIterator<Item = (Address, u128)>,
     ) -> Result<(), DB::Error> {
         // make transition and update cache state
         let mut transitions = Vec::new();
-        for (address, update) in balances {
-            let cache_account = self.load_cache_account(address)?;
-            let mut info = cache_account.account_info().unwrap_or_default();
-            let new_balance = match update {
-                LazyUpdateValue::Increase(value) => info.balance.saturating_add(U256::from(value)),
-                LazyUpdateValue::Decrease(value) => info.balance.saturating_sub(U256::from(value)),
-            };
-            if info.balance != new_balance {
-                info.balance = new_balance;
-                transitions.push((address, cache_account.change(info, Default::default())));
+        for (address, balance) in balances {
+            if balance == 0 {
+                continue;
             }
+            let original_account = self.load_cache_account(address)?;
+            transitions.push((
+                address,
+                original_account.increment_balance(balance).expect("Balance is not zero"),
+            ))
         }
         // append transition
         if let Some(s) = self.state.transition_state.as_mut() {
@@ -468,16 +415,29 @@ pub(crate) struct PartitionDB<DB> {
 
     /// Record the read set of current tx, will be consumed after the execution of each tx
     tx_read_set: AHashMap<LocationAndType, Option<U256>>,
+
+    pub current_txid: TxId,
+    pub raw_transfer: bool,
+    rewards_accumulators: Arc<RewardsAccumulators>,
+    accumulated_rewards: u128,
 }
 
 impl<DB> PartitionDB<DB> {
-    pub(crate) fn new(coinbase: Address, scheduler_db: Arc<SchedulerDB<DB>>) -> Self {
+    pub(crate) fn new(
+        coinbase: Address,
+        scheduler_db: Arc<SchedulerDB<DB>>,
+        rewards_accumulators: Arc<RewardsAccumulators>,
+    ) -> Self {
         Self {
             coinbase,
             cache: CacheState::new(scheduler_db.state.cache.has_state_clear),
             scheduler_db,
             block_hashes: BTreeMap::new(),
             tx_read_set: AHashMap::new(),
+            current_txid: 0,
+            raw_transfer: true,
+            rewards_accumulators,
+            accumulated_rewards: 0,
         }
     }
 
@@ -489,12 +449,7 @@ impl<DB> PartitionDB<DB> {
     /// Generate the write set after evm.transact() for each tx
     /// The write set includes the locations of the basic account, code, and storage slots that have
     /// been modified. Returns the write set(exclude miner) and the miner's rewards.
-    pub(crate) fn generate_write_set(
-        &self,
-        changes: &mut EvmState,
-    ) -> (LocationSet, LazyUpdateValue, bool) {
-        let mut miner_update = LazyUpdateValue::default();
-        let mut remove_miner = true;
+    pub(crate) fn generate_write_set(&self, changes: &mut EvmState) -> LocationSet {
         let mut write_set = AHashSet::new();
         for (address, account) in &mut *changes {
             if account.is_selfdestructed() {
@@ -506,37 +461,6 @@ impl<DB> PartitionDB<DB> {
                 // which could lead to errors.
                 write_set.insert(LocationAndType::Basic(*address));
                 continue;
-            }
-
-            // Lazy update miner's balance
-            let mut miner_updated = false;
-            if self.coinbase == *address {
-                let add_nonce = match self.cache.accounts.get(address) {
-                    Some(miner) => match miner.account.as_ref() {
-                        Some(miner) => {
-                            if account.info.balance >= miner.info.balance {
-                                miner_update = LazyUpdateValue::Increase(
-                                    (account.info.balance - miner.info.balance).to(),
-                                );
-                            } else {
-                                miner_update = LazyUpdateValue::Decrease(
-                                    (miner.info.balance - account.info.balance).to(),
-                                );
-                            }
-                            account.info.balance = miner.info.balance;
-                            account.info.nonce - miner.info.nonce
-                        }
-                        // LoadedNotExisting
-                        None => {
-                            miner_update = LazyUpdateValue::Increase(account.info.balance.to());
-                            account.info.balance = U256::ZERO;
-                            account.info.nonce
-                        }
-                    },
-                    None => panic!("Miner should be cached"),
-                };
-                miner_updated = true;
-                remove_miner = add_nonce == 0 && account.changed_storage_slots().count() == 0;
             }
 
             // If the account is touched, it means that the account's state has been modified
@@ -562,8 +486,7 @@ impl<DB> PartitionDB<DB> {
                         new_contract_account = has_code;
                         true
                     }
-                } && !miner_updated
-                {
+                } {
                     write_set.insert(LocationAndType::Basic(*address));
                 }
                 if new_contract_account {
@@ -575,7 +498,7 @@ impl<DB> PartitionDB<DB> {
                 write_set.insert(LocationAndType::Storage(*address, *slot));
             }
         }
-        (write_set, miner_update, remove_miner)
+        write_set
     }
 
     /// Temporary commit the state change after evm.transact() for each tx
@@ -647,7 +570,7 @@ where
 
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
         // 1. read from internal cache
-        let result = match self.cache.accounts.entry(address) {
+        let mut result = match self.cache.accounts.entry(address) {
             hash_map::Entry::Vacant(entry) => {
                 // 2. read initial state of this round from scheduler cache
                 if let Some(account) = self.scheduler_db.state.cache.accounts.get(&address) {
@@ -660,17 +583,51 @@ where
             }
             hash_map::Entry::Occupied(entry) => Ok(entry.get().account_info()),
         };
-        let mut balance = None;
-        if let Ok(account) = &result {
+
+        let mut inc_rewards = 0;
+        if address == self.coinbase && !self.raw_transfer {
+            if let Some(accumulator) = self.rewards_accumulators.get(&self.current_txid) {
+                let mut wait_time_ms = 0;
+                let loop_wait_time = 10; // 10ms
+                let wait_time_out = 10_1000; // 10s
+                while accumulator.accumulate_counter.load(Ordering::Acquire) <
+                    accumulator.accumulate_num
+                {
+                    let notifier = accumulator.notifier.clone();
+                    tokio::task::block_in_place(move || {
+                        GREVM_RUNTIME.block_on(async move {
+                            let _ =
+                                timeout(Duration::from_millis(loop_wait_time), notifier.notified())
+                                    .await
+                                    .is_ok();
+                        })
+                    });
+                    wait_time_ms += loop_wait_time;
+                    if wait_time_ms > wait_time_out {
+                        panic!(
+                            "wait to much time for the accumulated rewards of account({:?})",
+                            address
+                        );
+                    }
+                }
+                let new_rewards = accumulator.accumulate_rewards.load(Ordering::Acquire);
+                inc_rewards = new_rewards - self.accumulated_rewards;
+                self.accumulated_rewards = new_rewards;
+            }
+            self.tx_read_set.entry(LocationAndType::Basic(address)).or_insert(None);
+        }
+        let mut balance = U256::ZERO;
+        if let Ok(account) = &mut result {
             if let Some(info) = account {
                 if !info.is_empty_code_hash() {
                     self.tx_read_set.insert(LocationAndType::Code(address), None);
                 }
-                balance = Some(info.balance);
+                info.balance = info.balance.saturating_add(U256::from(inc_rewards));
+                balance = info.balance;
             }
         }
-        if address != self.coinbase {
-            self.tx_read_set.insert(LocationAndType::Basic(address), balance);
+        if address != self.coinbase || self.raw_transfer {
+            self.tx_read_set.entry(LocationAndType::Basic(address)).or_insert(Some(balance));
         }
         result
     }
@@ -702,7 +659,7 @@ where
         if let Ok(value) = &result {
             slot_value = Some(value.clone());
         }
-        self.tx_read_set.insert(LocationAndType::Storage(address, index), slot_value);
+        self.tx_read_set.entry(LocationAndType::Storage(address, index)).or_insert(slot_value);
 
         result
     }
