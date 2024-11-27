@@ -13,6 +13,7 @@ use revm::{
     primitives::{Account, AccountInfo, Bytecode, EvmState, B256, BLOCK_HASH_HISTORY, U256},
     CacheState, Database, DatabaseCommit, DatabaseRef, TransitionAccount, TransitionState,
 };
+use revm_primitives::KECCAK_EMPTY;
 use std::{
     collections::{btree_map, hash_map, BTreeMap, HashMap},
     sync::{
@@ -624,6 +625,13 @@ where
                 }
                 info.balance = info.balance.saturating_add(U256::from(inc_rewards));
                 balance = info.balance;
+            } else if inc_rewards != 0 {
+                result = Ok(Some(AccountInfo::new(
+                    U256::from(inc_rewards),
+                    0,
+                    KECCAK_EMPTY,
+                    Bytecode::default(),
+                )));
             }
         }
         if address != self.coinbase || self.raw_transfer {
