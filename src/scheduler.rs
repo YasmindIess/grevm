@@ -11,7 +11,8 @@ use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use atomic::Atomic;
 use dashmap::DashSet;
 use fastrace::Span;
-use metrics::{counter, gauge};
+use lazy_static::lazy_static;
+use metrics::{gauge, histogram};
 use revm::{
     primitives::{
         AccountInfo, Address, Bytecode, EVMError, Env, ExecutionResult, SpecId, TxEnv, B256, U256,
@@ -32,74 +33,125 @@ use tracing::info;
 
 struct ExecuteMetrics {
     /// Number of times parallel execution is called.
-    parallel_execute_calls: metrics::Counter,
+    parallel_execute_calls: metrics::Gauge,
     /// Number of times sequential execution is called.
-    sequential_execute_calls: metrics::Counter,
+    sequential_execute_calls: metrics::Gauge,
 
     /// Total number of transactions.
-    total_tx_cnt: metrics::Counter,
+    total_tx_cnt: metrics::Histogram,
     /// Number of transactions executed in parallel.
-    parallel_tx_cnt: metrics::Counter,
+    parallel_tx_cnt: metrics::Histogram,
     /// Number of transactions executed sequentially.
-    sequential_tx_cnt: metrics::Counter,
+    sequential_tx_cnt: metrics::Histogram,
     /// Number of transactions that encountered conflicts.
-    conflict_tx_cnt: metrics::Counter,
+    conflict_tx_cnt: metrics::Histogram,
     /// Number of transactions that reached finality.
-    finality_tx_cnt: metrics::Counter,
+    finality_tx_cnt: metrics::Histogram,
     /// Number of transactions that are unconfirmed.
-    unconfirmed_tx_cnt: metrics::Counter,
+    unconfirmed_tx_cnt: metrics::Histogram,
     /// Number of reusable transactions.
-    reusable_tx_cnt: metrics::Counter,
+    reusable_tx_cnt: metrics::Histogram,
     /// Number of transactions that skip validation
-    skip_validation_cnt: metrics::Counter,
+    skip_validation_cnt: metrics::Histogram,
 
     /// Number of concurrent partitions.
-    concurrent_partition_num: metrics::Gauge,
+    concurrent_partition_num: metrics::Histogram,
     /// Execution time difference between partitions(in nanoseconds).
-    partition_et_diff: metrics::Gauge,
+    partition_et_diff: metrics::Histogram,
     /// Number of transactions difference between partitions.
-    partition_tx_diff: metrics::Gauge,
+    partition_tx_diff: metrics::Histogram,
 
     /// Time taken to parse execution hints(in nanoseconds).
-    parse_hints_time: metrics::Counter,
+    parse_hints_time: metrics::Histogram,
     /// Time taken to partition transactions(in nanoseconds).
-    partition_tx_time: metrics::Counter,
+    partition_tx_time: metrics::Histogram,
     /// Time taken to execute transactions in parallel(in nanoseconds).
-    parallel_execute_time: metrics::Counter,
+    parallel_execute_time: metrics::Histogram,
     /// Time taken to validate transactions(in nanoseconds).
-    validate_time: metrics::Counter,
+    validate_time: metrics::Histogram,
     /// Time taken to merge write set.
-    merge_write_set_time: metrics::Counter,
+    merge_write_set_time: metrics::Histogram,
     /// Time taken to commit transition
-    commit_transition_time: metrics::Counter,
+    commit_transition_time: metrics::Histogram,
     /// Time taken to execute transactions in sequential(in nanoseconds).
-    sequential_execute_time: metrics::Counter,
+    sequential_execute_time: metrics::Histogram,
 }
 
 impl Default for ExecuteMetrics {
     fn default() -> Self {
         Self {
-            parallel_execute_calls: counter!("grevm.parallel_round_calls"),
-            sequential_execute_calls: counter!("grevm.sequential_execute_calls"),
-            total_tx_cnt: counter!("grevm.total_tx_cnt"),
-            parallel_tx_cnt: counter!("grevm.parallel_tx_cnt"),
-            sequential_tx_cnt: counter!("grevm.sequential_tx_cnt"),
-            finality_tx_cnt: counter!("grevm.finality_tx_cnt"),
-            conflict_tx_cnt: counter!("grevm.conflict_tx_cnt"),
-            unconfirmed_tx_cnt: counter!("grevm.unconfirmed_tx_cnt"),
-            reusable_tx_cnt: counter!("grevm.reusable_tx_cnt"),
-            skip_validation_cnt: counter!("grevm.skip_validation_cnt"),
-            concurrent_partition_num: gauge!("grevm.concurrent_partition_num"),
-            partition_et_diff: gauge!("grevm.partition_execution_time_diff"),
-            partition_tx_diff: gauge!("grevm.partition_num_tx_diff"),
-            parse_hints_time: counter!("grevm.parse_hints_time"),
-            partition_tx_time: counter!("grevm.partition_tx_time"),
-            parallel_execute_time: counter!("grevm.parallel_execute_time"),
-            validate_time: counter!("grevm.validate_time"),
-            merge_write_set_time: counter!("grevm.merge_write_set_time"),
-            commit_transition_time: counter!("grevm.commit_transition_time"),
-            sequential_execute_time: counter!("grevm.sequential_execute_time"),
+            parallel_execute_calls: gauge!("grevm.parallel_round_calls"),
+            sequential_execute_calls: gauge!("grevm.sequential_execute_calls"),
+            total_tx_cnt: histogram!("grevm.total_tx_cnt"),
+            parallel_tx_cnt: histogram!("grevm.parallel_tx_cnt"),
+            sequential_tx_cnt: histogram!("grevm.sequential_tx_cnt"),
+            finality_tx_cnt: histogram!("grevm.finality_tx_cnt"),
+            conflict_tx_cnt: histogram!("grevm.conflict_tx_cnt"),
+            unconfirmed_tx_cnt: histogram!("grevm.unconfirmed_tx_cnt"),
+            reusable_tx_cnt: histogram!("grevm.reusable_tx_cnt"),
+            skip_validation_cnt: histogram!("grevm.skip_validation_cnt"),
+            concurrent_partition_num: histogram!("grevm.concurrent_partition_num"),
+            partition_et_diff: histogram!("grevm.partition_execution_time_diff"),
+            partition_tx_diff: histogram!("grevm.partition_num_tx_diff"),
+            parse_hints_time: histogram!("grevm.parse_hints_time"),
+            partition_tx_time: histogram!("grevm.partition_tx_time"),
+            parallel_execute_time: histogram!("grevm.parallel_execute_time"),
+            validate_time: histogram!("grevm.validate_time"),
+            merge_write_set_time: histogram!("grevm.merge_write_set_time"),
+            commit_transition_time: histogram!("grevm.commit_transition_time"),
+            sequential_execute_time: histogram!("grevm.sequential_execute_time"),
         }
+    }
+}
+
+/// Collect metrics and report
+#[derive(Default)]
+struct ExecuteMetricsCollector {
+    parallel_execute_calls: u64,
+    sequential_execute_calls: u64,
+    total_tx_cnt: u64,
+    parallel_tx_cnt: u64,
+    sequential_tx_cnt: u64,
+    conflict_tx_cnt: u64,
+    finality_tx_cnt: u64,
+    unconfirmed_tx_cnt: u64,
+    reusable_tx_cnt: u64,
+    skip_validation_cnt: u64,
+    concurrent_partition_num: u64,
+    partition_et_diff: u64,
+    partition_tx_diff: u64,
+    parse_hints_time: u64,
+    partition_tx_time: u64,
+    parallel_execute_time: u64,
+    validate_time: u64,
+    merge_write_set_time: u64,
+    commit_transition_time: u64,
+    sequential_execute_time: u64,
+}
+
+impl ExecuteMetricsCollector {
+    fn report(&self) {
+        let execute_metrics = ExecuteMetrics::default();
+        execute_metrics.parallel_execute_calls.set(self.parallel_execute_calls as f64);
+        execute_metrics.sequential_execute_calls.set(self.sequential_execute_calls as f64);
+        execute_metrics.total_tx_cnt.record(self.total_tx_cnt as f64);
+        execute_metrics.parallel_tx_cnt.record(self.parallel_tx_cnt as f64);
+        execute_metrics.sequential_tx_cnt.record(self.sequential_tx_cnt as f64);
+        execute_metrics.conflict_tx_cnt.record(self.conflict_tx_cnt as f64);
+        execute_metrics.finality_tx_cnt.record(self.finality_tx_cnt as f64);
+        execute_metrics.unconfirmed_tx_cnt.record(self.unconfirmed_tx_cnt as f64);
+        execute_metrics.reusable_tx_cnt.record(self.reusable_tx_cnt as f64);
+        execute_metrics.skip_validation_cnt.record(self.skip_validation_cnt as f64);
+        execute_metrics.concurrent_partition_num.record(self.concurrent_partition_num as f64);
+        execute_metrics.partition_et_diff.record(self.partition_et_diff as f64);
+        execute_metrics.partition_tx_diff.record(self.partition_tx_diff as f64);
+        execute_metrics.parse_hints_time.record(self.parse_hints_time as f64);
+        execute_metrics.partition_tx_time.record(self.partition_tx_time as f64);
+        execute_metrics.parallel_execute_time.record(self.parallel_execute_time as f64);
+        execute_metrics.validate_time.record(self.validate_time as f64);
+        execute_metrics.merge_write_set_time.record(self.merge_write_set_time as f64);
+        execute_metrics.commit_transition_time.record(self.commit_transition_time as f64);
+        execute_metrics.sequential_execute_time.record(self.sequential_execute_time as f64);
     }
 }
 
@@ -203,7 +255,7 @@ where
 
     rewards_accumulators: Arc<RewardsAccumulators>,
 
-    metrics: ExecuteMetrics,
+    metrics: ExecuteMetricsCollector,
 }
 
 /// A wrapper for DatabaseRef.
@@ -311,15 +363,15 @@ where
                 min = partition.len();
             }
         }
-        self.metrics.partition_tx_diff.set((max - min) as f64);
-        self.metrics.concurrent_partition_num.set(self.num_partitions as f64);
-        self.metrics.partition_tx_time.increment(start.elapsed().as_nanos() as u64);
+        self.metrics.partition_tx_diff += (max - min) as u64;
+        self.metrics.concurrent_partition_num = self.num_partitions as u64;
+        self.metrics.partition_tx_time += start.elapsed().as_nanos() as u64;
     }
 
     /// Execute transactions in parallel.
     #[fastrace::trace]
     fn round_execute(&mut self) -> Result<(), GrevmError<DB::Error>> {
-        self.metrics.parallel_execute_calls.increment(1);
+        self.metrics.parallel_execute_calls += 1;
         self.partition_executors.clear();
         for partition_id in 0..self.num_partitions {
             let executor = PartitionExecutor::new(
@@ -349,7 +401,7 @@ where
                 futures::future::join_all(tasks).await;
             })
         });
-        self.metrics.parallel_execute_time.increment(start.elapsed().as_nanos() as u64);
+        self.metrics.parallel_execute_time += start.elapsed().as_nanos() as u64;
 
         self.validate_transactions()
     }
@@ -377,7 +429,7 @@ where
                 }
             }
         }
-        self.metrics.merge_write_set_time.increment(start.elapsed().as_nanos() as u64);
+        self.metrics.merge_write_set_time += start.elapsed().as_nanos() as u64;
         (end_skip_id, merged_write_set)
     }
 
@@ -417,7 +469,7 @@ where
     fn generate_unconfirmed_txs(&mut self) -> Vec<TxId> {
         let num_partitions = self.num_partitions;
         let (end_skip_id, merged_write_set) = self.merge_write_set();
-        self.metrics.skip_validation_cnt.increment((end_skip_id - self.num_finality_txs) as u64);
+        self.metrics.skip_validation_cnt += (end_skip_id - self.num_finality_txs) as u64;
         let miner_location = LocationAndType::Basic(self.coinbase);
         let miner_involved_txs = DashSet::new();
         fork_join_util(num_partitions, Some(num_partitions), |_, _, part| {
@@ -483,7 +535,7 @@ where
         let mut max_execute_time = Duration::from_secs(0);
         for executor in &self.partition_executors {
             let mut executor = executor.write().unwrap();
-            self.metrics.reusable_tx_cnt.increment(executor.metrics.reusable_tx_cnt);
+            self.metrics.reusable_tx_cnt += executor.metrics.reusable_tx_cnt;
             min_execute_time = min_execute_time.min(executor.metrics.execute_time);
             max_execute_time = max_execute_time.max(executor.metrics.execute_time);
             if executor.assigned_txs[0] == self.num_finality_txs &&
@@ -497,7 +549,7 @@ where
         let mut conflict_tx_cnt = 0;
         let mut unconfirmed_tx_cnt = 0;
         let mut finality_tx_cnt = 0;
-        self.metrics.partition_et_diff.set((max_execute_time - min_execute_time).as_nanos() as f64);
+        self.metrics.partition_et_diff += (max_execute_time - min_execute_time).as_nanos() as u64;
         #[allow(invalid_reference_casting)]
         let tx_states =
             unsafe { &mut *(&(*self.tx_states) as *const Vec<TxState> as *mut Vec<TxState>) };
@@ -523,14 +575,14 @@ where
                 }
             }
         }
-        self.metrics.conflict_tx_cnt.increment(conflict_tx_cnt as u64);
-        self.metrics.unconfirmed_tx_cnt.increment(unconfirmed_tx_cnt as u64);
-        self.metrics.finality_tx_cnt.increment(finality_tx_cnt as u64);
+        self.metrics.conflict_tx_cnt += conflict_tx_cnt;
+        self.metrics.unconfirmed_tx_cnt += unconfirmed_tx_cnt;
+        self.metrics.finality_tx_cnt += finality_tx_cnt;
         info!(
             "Find continuous finality txs: conflict({}), unconfirmed({}), finality({})",
             conflict_tx_cnt, unconfirmed_tx_cnt, finality_tx_cnt
         );
-        return Ok(finality_tx_cnt);
+        return Ok(finality_tx_cnt as usize);
     }
 
     /// Commit the transition of the finality transactions, and update the minner's rewards.
@@ -586,7 +638,7 @@ where
         database
             .increment_balances(vec![(self.coinbase, rewards)])
             .map_err(|err| GrevmError::EvmError(EVMError::Database(err)))?;
-        self.metrics.commit_transition_time.increment(start.elapsed().as_nanos() as u64);
+        self.metrics.commit_transition_time += start.elapsed().as_nanos() as u64;
         Ok(())
     }
 
@@ -609,7 +661,7 @@ where
             }
         }
         self.rewards_accumulators = Arc::new(rewards_accumulators);
-        self.metrics.validate_time.increment(start.elapsed().as_nanos() as u64);
+        self.metrics.validate_time += start.elapsed().as_nanos() as u64;
         Ok(())
     }
 
@@ -638,8 +690,8 @@ where
     #[fastrace::trace]
     fn execute_remaining_sequential(&mut self) -> Result<(), GrevmError<DB::Error>> {
         let start = Instant::now();
-        self.metrics.sequential_execute_calls.increment(1);
-        self.metrics.sequential_tx_cnt.increment((self.txs.len() - self.num_finality_txs) as u64);
+        self.metrics.sequential_execute_calls += 1;
+        self.metrics.sequential_tx_cnt += (self.txs.len() - self.num_finality_txs) as u64;
         // MUST drop the `PartitionExecutor::scheduler_db` before get mut
         self.partition_executors.clear();
         let database = Arc::get_mut(&mut self.database).unwrap();
@@ -662,7 +714,7 @@ where
                 Err(err) => return Err(GrevmError::EvmError(err)),
             }
         }
-        self.metrics.sequential_execute_time.increment(start.elapsed().as_nanos() as u64);
+        self.metrics.sequential_execute_time += start.elapsed().as_nanos() as u64;
         Ok(())
     }
 
@@ -672,7 +724,7 @@ where
         let hints = ParallelExecutionHints::new(self.tx_states.clone());
         hints.parse_hints(self.txs.clone());
         self.tx_dependencies.init_tx_dependency(self.tx_states.clone());
-        self.metrics.parse_hints_time.increment(start.elapsed().as_nanos() as u64);
+        self.metrics.parse_hints_time += start.elapsed().as_nanos() as u64;
     }
 
     #[fastrace::trace]
@@ -689,7 +741,7 @@ where
             self.num_partitions = num_partitions;
         }
 
-        self.metrics.total_tx_cnt.increment(self.txs.len() as u64);
+        self.metrics.total_tx_cnt += self.txs.len() as u64;
         let force_parallel = !force_sequential.unwrap_or(true); // adaptive false
         let force_sequential = force_sequential.unwrap_or(false); // adaptive false
 
@@ -712,13 +764,14 @@ where
                     break;
                 }
             }
-            self.metrics.parallel_tx_cnt.increment(self.num_finality_txs as u64);
+            self.metrics.parallel_tx_cnt += self.num_finality_txs as u64;
         }
 
         if self.num_finality_txs < self.txs.len() {
             info!("Sequential execute {} remaining txs", self.txs.len() - self.num_finality_txs);
             self.execute_remaining_sequential()?;
         }
+        self.metrics.report();
 
         Ok(ExecuteOutput { results: std::mem::take(&mut self.results) })
     }
