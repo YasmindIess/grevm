@@ -33,34 +33,84 @@ pub fn new_grevm_scheduler<DB>(
     spec_id: SpecId,
     env: Env,
     db: DB,
-    txs: Vec<TxEnv>,
+    txs: Arc<Vec<TxEnv>>,
+    state: Option<Box<State>>,
 ) -> GrevmScheduler<DatabaseWrapper<DB::Error>>
 where
     DB: DatabaseRef + Send + Sync,
-    DB::Error: Send + Sync,
+    DB::Error: Clone + Send + Sync + 'static,
 ```
 
 ### Introduce Grevm to Reth
 
-Reth provides a `BlockExecutorProvider` to create an `Executor` for executing transactions. In theory, integrating Grevm should only require creating an `EthGrevmExecutor`. However, `BlockExecutorProvider` imposes a `DB` constraint that uses the `Database` trait, which is a mutable interface and doesn’t align with Grevm’s read-only requirements. In practice, the passed `DB` parameter does fulfill the `DatabaseRef` trait, which Grevm requires. Therefore, it’s necessary to add a `parallel_executor` to `BlockExecutorProvider` to introduce a `DatabaseRef` constraint.
+Reth provides the `BlockExecutorProvider` trait for creating `Executor` for executing a single block in live sync and `BatchExecutor` for executing a batch of blocks in historical sync. However, the associated type constraints in `BlockExecutorProvider` do not meet the `DB` constraints required for parallel block execution. To avoid imposing constraints on the `DB` satisfying `ParallelDatabase` on all structs that implement the `BlockExecutorProvider` trait in Reth, we have designed the `ParallelExecutorProvider` trait for creating `Executor` and `BatchExecutor` that satisfy the `ParallelDatabase` constraint. We have also extended the `BlockExecutorProvider` trait with a `try_into_parallel_provider` method. If a `BlockExecutorProvider` needs to support parallel execution, the implementation of `try_into_parallel_provider` is required to return a struct that implements the `ParallelExecutorProvider` trait; otherwise, it defaults to return `None`. Through this design, without imposing stronger constraints on the `DB` in the `BlockExecutorProvider` trait, developers are provided with the optional ability to extend `BlockExecutorProvider` to produce parallel block executors. For `EthExecutorProvider`, which provides executors to execute regular ethereum blocks, we have implemented `GrevmExecutorProvider` to extend its capability for parallel execution of ethereum blocks. `GrevmExecutorProvider` can create `GrevmBlockExecutor` and `GrevmBatchExecutor` that execute blocks using Grevm parallel executor.
 
 ```rust
-pub trait ParallelDatabase: DatabaseRef<Error: Send + Sync> + Send + Sync {}
+// crates/evm/src/execute.rs
 
-impl<EvmConfig> BlockExecutorProvider for EthExecutorProvider<EvmConfig>
-where
-    EvmConfig: ConfigureEvm,
-{
-    fn parallel_executor<DB>(&self, db: DB) -> Self::ParallelExecutor<DB>
-    where
-        DB: ParallelDatabase<Error: Into<ProviderError> + Display + Clone>,
-    {
-        EthGrevmExecutor::new(self.chain_spec.clone(), self.evm_config.clone(), db)
+pub trait BlockExecutorProvider: Send + Sync + Clone + Unpin + 'static {
+    ...
+    type ParallelProvider<'a>: ParallelExecutorProvider;
+
+    /// Try to create a parallel provider from this provider.
+    /// Return None if the block provider does not support parallel execution.
+    fn try_into_parallel_provider(&self) -> Option<Self::ParallelProvider<'_>> {
+        None
     }
+}
+
+/// A type that can create a new parallel executor for block execution.
+pub trait ParallelExecutorProvider {
+    type Executor<DB: ParallelDatabase>: for<'a> Executor<
+        DB,
+        Input<'a> = BlockExecutionInput<'a, BlockWithSenders>,
+        Output = BlockExecutionOutput<Receipt>,
+        Error = BlockExecutionError,
+    >;
+
+    type BatchExecutor<DB: ParallelDatabase>: for<'a> BatchExecutor<
+        DB,
+        Input<'a> = BlockExecutionInput<'a, BlockWithSenders>,
+        Output = ExecutionOutcome,
+        Error = BlockExecutionError,
+    >;
+
+    fn executor<DB>(&self, db: DB) -> Self::Executor<DB>
+    where
+        DB: ParallelDatabase;
+
+    fn batch_executor<DB>(&self, db: DB) -> Self::BatchExecutor<DB>
+    where
+        DB: ParallelDatabase;
 }
 ```
 
-The integration code for connecting Grevm to Reth is already complete. You can check it out here: [Introduce Grevm to Reth](https://github.com/Galxe/grevm-reth/commit/52472e6c6b125d5f038e93f6c5eddc57b230ba66)
+When there is a need to execute a block, we expect developers to call `BlockExecutorProvider::try_into_parallel_provider` and decide whether to use the parallel execution solution provided by `BlockExecutorProvider` based on the returned value, or resort to sequential block execution if there is no corresponding parallel execution implementation in `BlockExecutorProvider`. By making such calls, we can also control the return value of `try_into_parallel_provider` by setting the environment variable `EVM_DISABLE_GREVM`, reverting to Reth's native executor based on revm for block execution. This feature is handy for conducting comparative experiments.
+
+```rust
+// crates/blockchain-tree/src/chain.rs
+// AppendableChain::validate_and_execute
+let state = if let Some(parallel_provider) =
+    externals.executor_factory.try_into_parallel_provider()
+{
+    parallel_provider.executor(db).execute((&block, U256::MAX).into())?
+} else {
+    externals.executor_factory.executor(db).execute((&block, U256::MAX).into())?
+};
+```
+
+```rust
+// crates/blockchain-tree/src/chain.rs
+// ExecutionStage::execute
+let mut executor =
+    if let Some(parallel_provider) = self.executor_provider.try_into_parallel_provider() {
+        EitherBatchExecutor::Parallel(parallel_provider.batch_executor(Arc::new(db)))
+    } else {
+        EitherBatchExecutor::Sequential(self.executor_provider.batch_executor(db))
+    };
+```
+
+The integration code for connecting Grevm to Reth is already complete. You can check it out here: [Introduce Grevm to Reth](https://github.com/Galxe/grevm-reth/commit/9473670ab3c02e3699af1413f9c7bffc4bbbee45)
 
 ## Metrics
 
