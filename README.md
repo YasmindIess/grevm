@@ -12,7 +12,7 @@ transaction re-executions.
 
 In our benchmark, Grevm stands as the **fastest** open-source parallel EVM implementation to date. For fully
 parallelizable transactions, Grevm is **4.13×** faster than sequential execution, running at **26.50 gigagas/s.** If we
-simulate real-world I/O latency of **100 μs**, it is **50.84×** faster than sequential execution, with **6.80
+simulate real-world I/O latency of **100 μs**, it is **50.84×** faster than sequential execution, with **6.80
 gigagas/s** throughput. This leap in performance is attributed to both the parallelized execution and the integration of
 asynchronous I/O operations—enabled by the parallelism—which further amplifies the speedup by efficiently overlapping
 I/O operations.
@@ -61,7 +61,7 @@ Consider a sequence of transactions ordered as **Tx₁**, **Tx₂**, ..., **Tx�
 3. **Parallel Execution on Software Transactional Memory (STM) System**:
    - A high-performance **STM** provides multi-version state access to each thread
    - During execution, each transaction can read the writes of all preceding transactions but not those of subsequent
-     ones, effectively avoiding read-after-write hazards.
+     ones, effectively avoiding write-after-read hazards.
    - **Write-After-Write Conflict Resolution**:
      - If multiple transactions write to the same storage slot, the STM resolves the conflict by using the value from
        the transaction with the highest sequence number (i.e., the latest transaction in the sequence).
@@ -78,9 +78,9 @@ synchronization—is challenging due to several factors:
   computational overhead, potentially negating the benefits of parallel execution.
 
 Recognizing these limitations, our approach leverages transaction simulation results obtained by running each
-transaction against the latest state view before execution. These simulations provide estimates of which storage slots a
-transaction will read or write, which serves as input to build the data dependency DAG. These hints can be computed
-before parallel execution, avoiding introducing additional computational overhead during execution.
+transaction against the most recent available state view before execution. These simulations provide estimates of which
+storage slots a transaction will read or write, which serves as input to build the data dependency DAG. These hints can
+be computed before parallel execution, avoiding introducing additional computational overhead during execution.
 
 ![image.png](images/glassnode-studio_eth-ethereum-transaction-type-breakdown-relative.png)
 
@@ -194,10 +194,11 @@ Replace `${NUM_EOA}`, `${HOT_RATIO}`, and `${DB_LATENCY_US}` with the desired pa
 
 We conducted the gigagas block test, a benchmark designed to evaluate the efficiency of parallel execution under varying
 workloads and conditions. We reused some portions of the benchmarking code from pevm. Each mock block contains
-transactions totaling **1 gigagas** in gas consumption. The transactions include vanilla Ether transfers, ERC20 token
-transfers, and Uniswap swaps. Pre-state data is stored entirely in-memory to isolate execution performance from disk I/O
-variability. To mimic real-world conditions where disk I/O latency can impact performance, we introduced artificial
-latency using the `db_latency` parameter.
+transactions totaling **1 gigagas** in gas consumption. Note that we use the actual gas consumption of transactions to
+calculate the total gas, which accounts for the gas refunds. The transactions include vanilla Ether transfers, ERC20
+token transfers, and Uniswap swaps. Pre-state data is stored entirely in-memory to isolate execution performance from
+disk I/O variability. To mimic real-world conditions where disk I/O latency can impact performance, we introduced
+artificial latency using the `db_latency` parameter.
 
 ### Conflict-Free Transactions
 
